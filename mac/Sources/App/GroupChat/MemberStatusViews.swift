@@ -6,7 +6,10 @@ import SwiftUI
 struct MemberStatusBar: View {
     @EnvironmentObject private var model: AppModel
     let item: MemberDetail
-    let pendingCount: Int
+    let pending: [Delivery] // 这个成员还在排队的投递
+    @StateObject private var showPending = LocalState(false)
+
+    private var pendingCount: Int { pending.count }
 
     private var queueText: String {
         if item.member.paused { return pendingCount > 0 ? "已暂停自动投递，\(pendingCount) 条排队" : "已暂停自动投递" }
@@ -18,7 +21,18 @@ struct MemberStatusBar: View {
             Circle().fill(item.statusColor).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.statusLabel).font(.callout.weight(.medium))
-                Text(queueText).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(queueText).font(.caption).foregroundStyle(.secondary)
+                    // 有排队的消息时，点这个图标看具体排着哪几条
+                    if pendingCount > 0 {
+                        Button { showPending.value = true } label: {
+                            Image(systemName: "list.bullet.rectangle").font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .tip("查看排队中的消息")
+                        .clickable()
+                    }
+                }
             }
             Spacer()
             Button {
@@ -32,6 +46,100 @@ struct MemberStatusBar: View {
             .clickable()
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+        .sheet(isPresented: $showPending.value) {
+            PendingDeliveriesSheet(alias: item.member.alias, memberId: item.member.id).environmentObject(model)
+        }
+    }
+}
+
+/// 排队中的消息列表（状态栏里点图标弹出）。直接读界面已经拿到的群详情，排队有变化时会跟着刷新
+struct PendingDeliveriesSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let alias: String
+    let memberId: Int64
+    @StateObject private var expanded = LocalState<Set<Int64>>([]) // 展开着的消息 id
+
+    /// 还在排队的消息，按排队先后；找不到原文的（理论上不会）跳过
+    private var items: [Message] {
+        guard let detail = model.detail else { return [] }
+        let messages = Dictionary(uniqueKeysWithValues: detail.messages.map { ($0.id, $0) })
+        return detail.deliveries
+            .filter { $0.memberId == memberId && $0.status == .pending }
+            .sorted { $0.id < $1.id }
+            .compactMap { messages[$0.messageId] }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("\(alias) 排队中的消息（\(items.count) 条）").font(.title3)
+            Text("等它空闲后会合并成一轮送进去；紧急消息排在前面。")
+                .font(.caption).foregroundStyle(.secondary)
+            if items.isEmpty {
+                Text("没有排队的消息了，可能刚刚已经送出去。")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 80)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, message in
+                            row(index: index, message: message)
+                        }
+                    }
+                }
+                .frame(maxHeight: 460)
+            }
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction).clickable()
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    /// 只有一条时直接展开；多条时默认收起，点哪条展开哪条
+    private func isExpanded(_ id: Int64) -> Bool { items.count == 1 || expanded.value.contains(id) }
+
+    /// 一条排队消息：标题行（序号、谁发给谁、紧急、时间、展开箭头）+ 正文（收起时只显示前两行）
+    private func row(index: Int, message: Message) -> some View {
+        let open = isExpanded(message.id)
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                if expanded.value.contains(message.id) { expanded.value.remove(message.id) } else { expanded.value.insert(message.id) }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("\(index + 1)").font(.caption2.weight(.semibold)).foregroundStyle(.secondary).monospacedDigit()
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color.secondary.opacity(0.15)))
+                    Text("\(displayName(message.from)) → \(displayName(message.to))").font(.caption.weight(.medium))
+                    if message.urgent {
+                        Text("紧急").font(.caption2.weight(.medium)).foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.red))
+                    }
+                    Spacer()
+                    Text(TimeText.time(message.createdAt)).font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                    if items.count > 1 {
+                        Image(systemName: open ? "chevron.up" : "chevron.down").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle()) // 整行都能点，不只是文字
+            }
+            .buttonStyle(.plain)
+            .clickable()
+            .allowsHitTesting(items.count > 1) // 只有一条时一直展开，标题行不用点
+
+            Text(message.content)
+                .font(.callout)
+                .lineLimit(open ? nil : 2)
+                .foregroundStyle(open ? .primary : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.07)))
     }
 }
 

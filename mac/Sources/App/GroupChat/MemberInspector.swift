@@ -37,7 +37,7 @@ struct MemberInspector: View {
             .frame(height: 52)
             Divider()
 
-            MemberStatusBar(item: item, pendingCount: deliveries.filter { $0.status == .pending }.count)
+            MemberStatusBar(item: item, pending: deliveries.filter { $0.status == .pending })
             if item.state.agentStatus == "waitingPermission" {
                 PermissionNotice(openTerminal: hasTerminal ? {
                     tab.value = .terminal
