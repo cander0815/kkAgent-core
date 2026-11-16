@@ -1,3 +1,7 @@
 .DS_Store
 # 编译产物：scripts/build.sh 生成
 mac/build/
+mac/.build/
+
+# 无法脱敏的文档（真实地址、本机路径、内部 ID 等），只留在本机，不提交
+kktodo/private/
