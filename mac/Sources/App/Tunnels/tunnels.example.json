@@ -1,0 +1,23 @@
+{
+  "tunnels": [
+    {
+      "id": "dev",
+      "name": "示例：开发环境",
+      "note": "经 dev-jump 中转：开发库 MySQL 和 Redis",
+      "host": "dev-jump",
+      "forwards": [
+        { "label": "MySQL", "localPort": 13306, "targetHost": "10.0.0.10", "targetPort": 3306 },
+        { "label": "Redis", "localPort": 16379, "targetHost": "10.0.0.10", "targetPort": 6379 }
+      ]
+    },
+    {
+      "id": "demo-service",
+      "name": "示例：带局域网访问的服务",
+      "note": "bind 写 0.0.0.0 时，局域网里的其他机器也能连这个端口；不写 bind 就只有本机能连",
+      "host": "root@203.0.113.5",
+      "forwards": [
+        { "label": "内部服务", "localPort": 8080, "targetHost": "10.0.0.20", "targetPort": 8080, "bind": "0.0.0.0" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+#!/bin/sh
+# kkAgent 命令行：给 Agent 用来往群里发消息。
+# 只依赖 sh 和 curl，这样 Codex 桌面端这类 PATH 里没有 node 的环境也能用。
+#
+#   kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--verdict pass|fail] [--urgent] "消息内容"
+#   kkAgent members -g <群ID>
+#   kkAgent spawn -g <主群ID> --from <群主名字> --task <功能名> "需求说明"   （集群：建子群和后台 coder / tester）
+#   kkAgent dissolve -g <子群ID> --from <群主名字>   （集群：群主解散自己的子群）
+#   kkAgent reopen -g <主群ID> --from <群主名字> --coder <会话ID> [--tester <会话ID>] --task <功能名> "说明"   （集群：找回已解散的子群）
+
+PORT="${KKAGENT_PORT:-7788}"
+HOST=127.0.0.1
+# 核心只跑在 macOS 物理机上。这个命令在 Linux 里运行，说明是在虚拟机里：
+# 经默认网关（就是物理机）访问核心
+[ "$(uname)" = Linux ] && HOST="$(ip route show default | awk '{print $3; exit}')"
+BASE="http://$HOST:$PORT"
+# 核心只认 Host 是本机地址的请求，从虚拟机访问时也要这样写
+HOST_HEADER="Host: 127.0.0.1:$PORT"
+
+usage() {
+  cat <<'EOF'
+用法：
+  kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--urgent] "消息内容"
+  kkAgent members -g <群ID>
+  kkAgent spawn -g <主群ID> --from <群主名字> --task <功能名> "需求说明"
+  kkAgent dissolve -g <子群ID> --from <群主名字>
+  kkAgent reopen -g <主群ID> --from <群主名字> --coder <原 coder 会话ID> [--tester <原 tester 会话ID>] --task <功能名> "这次要做什么"
+
+消息内容 / 需求说明写 - 时从标准输入读取。只发结论，不要发思考过程。
+--verdict 只给集群子群里的 tester 用，pass 和 fail 都只发给 coder。
+--urgent 标为紧急：对方空闲后排在普通消息前面送进去。只在对方继续做下去会白干、或者会造成破坏时用。
+EOF
+  exit 1
+}
+
+cmd="$1"
+[ -n "$cmd" ] || usage
+shift
+
+group="" from="" to="" task="" verdict="" urgent="" coder="" tester="" content=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -g|--group) group="$2"; shift 2 ;;
+    --from)     from="$2";  shift 2 ;;
+    --to)       to="$2";    shift 2 ;;
+    --task)     task="$2";  shift 2 ;;
+    --verdict)  verdict="$2"; shift 2 ;;
+    --urgent)   urgent=1; shift ;;
+    --coder)    coder="$2"; shift 2 ;;
+    --tester)   tester="$2"; shift 2 ;;
+    -h|--help)  usage ;;
+    *)          content="${content:+$content }$1"; shift ;; # 没加引号的多个词用空格拼回一句
+  esac
+done
+[ -n "$group" ] || usage
+[ "$content" = "-" ] && content="$(cat)"
+
+# --noproxy：请求的是本机服务，不能走 HTTP_PROXY 代理
+# 失败时 curl 返回非 0，服务返回的错误信息原样打印出来
+case "$cmd" in
+  send)
+    [ -n "$from" ] && [ -n "$to" ] && [ -n "$content" ] || usage
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" \
+      --data-urlencode "from=$from" \
+      --data-urlencode "to=$to" \
+      --data-urlencode "verdict=$verdict" \
+      --data-urlencode "urgent=$urgent" \
+      --data-urlencode "content=$content" \
+      "$BASE/api/groups/$group/messages"
+    ;;
+  members)
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" "$BASE/api/groups/$group/members?format=text"
+    ;;
+  spawn)
+    [ -n "$from" ] && [ -n "$task" ] && [ -n "$content" ] || usage
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" \
+      --data-urlencode "from=$from" \
+      --data-urlencode "task=$task" \
+      --data-urlencode "content=$content" \
+      "$BASE/api/groups/$group/spawn"
+    ;;
+  dissolve)
+    [ -n "$from" ] || usage
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" \
+      --data-urlencode "from=$from" \
+      "$BASE/api/groups/$group/dissolve"
+    ;;
+  reopen)
+    [ -n "$from" ] && [ -n "$coder" ] && [ -n "$task" ] && [ -n "$content" ] || usage
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" \
+      --data-urlencode "from=$from" \
+      --data-urlencode "coder=$coder" \
+      --data-urlencode "tester=$tester" \
+      --data-urlencode "task=$task" \
+      --data-urlencode "content=$content" \
+      "$BASE/api/groups/$group/reopen"
+    ;;
+  *)
+    usage
+    ;;
+esac
+code=$?
+# curl 退出码 7 = 连不上服务
+[ $code -eq 7 ] && echo "kkAgent 核心没有运行，请让用户打开 kkAgent app，在「核心设置」里启动核心" >&2
+exit $code
