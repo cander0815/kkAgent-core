@@ -1,0 +1,3 @@
+interface:
+  display_name: "任务派发"
+  short_description: "集中核查范围、依赖和归属，完成自包含任务书并复查后一次派发"

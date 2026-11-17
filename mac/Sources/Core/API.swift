@@ -391,7 +391,7 @@ final class API {
         }
         if verdict == "fail" && body.to != "coder" { throw UserError("验收不通过（--verdict fail）要发给 coder") }
         if verdict == "pass" && body.to != "coder" {
-            throw UserError("验收通过（--verdict pass）只发给 coder：群主只在任务完成（coder 合并完）或受阻时才需要知道")
+            throw UserError("验收通过（--verdict pass）只发给 coder：coder 会带着结论向群主报告、等群主放行")
         }
         return verdict
     }

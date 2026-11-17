@@ -1,0 +1,3 @@
+interface:
+  display_name: "集群恢复"
+  short_description: "上下文压缩或中断后恢复事实，处理消息、授权、账号和原生层卡点"

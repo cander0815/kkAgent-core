@@ -1,0 +1,3 @@
+interface:
+  display_name: "集群统筹"
+  short_description: "统筹多组任务、共享资源与合入窗口，基于最新台账主动接续和汇报"

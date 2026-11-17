@@ -1,0 +1,3 @@
+interface:
+  display_name: "验收收口"
+  short_description: "分开源码审查与功能实测，核对实际版本和证据并完成归档与移交"

@@ -83,7 +83,7 @@ enum Prompts {
         你只负责这一个功能，不用关心其他功能。
 
         工作目录（git worktree）：\(sub.worktree)
-        分支：\(sub.branch)，验收通过后合并回：\(sub.baseBranch)
+        分支：\(sub.branch)，验收通过、群主放行后合并回：\(sub.baseBranch)
 
         ## 这个功能的需求
         \(brief)
@@ -97,8 +97,11 @@ enum Prompts {
         加 --urgent 标为紧急，对方会优先看到。只在对方继续做下去会白干、或者会造成破坏时用；提审、验收结论、进度同步一律不加。
 
         ## 什么时候找群主 \(sub.owner)
-        只有两种情况：任务完成（coder 合并完成）、或者任务受阻（需求不清楚、做不下去、环境问题自己解决不了）。
-        其余时候都不要发给群主：阶段汇报、进度、提审、验收结论、对群主消息的确认，都不发。
+        只有三种情况：
+        1. 功能做完、tester 验收通过：coder 向群主报告，等群主验收、放行合并；
+        2. 合并完成：coder 报告最终的 SHA；
+        3. 任务受阻：需求不清楚、做不下去、环境问题自己解决不了。方向拿不准时也算，先问清楚再做，不要做偏了再返工。
+        其余时候都不要主动发给群主：阶段汇报、进度、提审、打回、对群主消息的确认，都不发。群主来问时照实回答。
         coder 和 tester 之间的事直接互相发。
         不要执行 kkAgent spawn / kkAgent dissolve，建子群和解散子群只由群主来做。
         """
@@ -115,7 +118,10 @@ enum Prompts {
                发完就结束这一轮，等 tester 的结论，验收期间不要再改文件。
             3. tester 打回：按意见修改，重新提交并发给 tester。
             4. 需求不清楚、或者做不下去：发给 \(sub.owner)，说清楚卡在哪里、需要它决定什么。
-            5. tester 验收通过后由你合并：
+            5. tester 验收通过后先不要合并，发给 \(sub.owner)：做了什么、最终提交的 SHA、tester 验收了什么、还有什么没验证。
+               发完就结束这一轮，等群主验收，期间不要再改文件。
+            6. 群主验收不通过：按意见修改，重新提交后先发给 tester 验收，通过后再按第 5 步报告群主。
+            7. 群主放行后由你合并（群主对合并另有安排的，按群主说的做）：
                a. 在工作目录里把 \(sub.baseBranch) 的最新代码合进来（git merge \(sub.baseBranch)），解决冲突，跑通测试；
                b. 这一步产生了任何新改动（包括解决冲突），重新提交并发回 tester 再验一次，拿到通过才继续；
                c. 到主目录确认当前检出的就是 \(sub.baseBranch)，然后执行 git merge --ff-only \(sub.branch)；
@@ -138,8 +144,8 @@ enum Prompts {
             3. 验收结论必须带 --verdict（系统靠它计数，打回次数过多会自动交给群主）：
                不通过：\(cli) send -g \(sub.id) --from tester --to coder --verdict fail "哪条不符合、怎么复现"
                通过：  \(cli) send -g \(sub.id) --from tester --to coder --verdict pass "验收了什么、在哪个 SHA 上"
-               结论只发给 coder，不用告诉 \(sub.owner)：coder 合并完会向它汇报。向 coder 提问、要补充信息时不带 --verdict。
-            4. 合并由 coder 负责，不要请别人合并。coder 合并时如果有新改动会再发给你验一次。
+               结论只发给 coder，不用告诉 \(sub.owner)：通过后 coder 会带着你的结论向群主报告。向 coder 提问、要补充信息时不带 --verdict。
+            4. 群主验收、放行后由 coder 合并，不要请别人合并。coder 合并时如果有新改动会再发给你验一次。
             5. 验收受阻（缺环境、工具用不了、需求有歧义自己没法判断）：发给 \(sub.owner)，说清楚卡在哪里。
 
             这一条只是让你记住角色和需求。现在立即结束这一轮：只回复「已就位」，不要发群消息，
@@ -163,7 +169,8 @@ enum Prompts {
     static func reopenedCoderIntro(sub: GroupSummary, brief: String) -> String {
         subgroupBasics(sub: sub, alias: "coder", role: "编码", brief: brief) + reopenedNote(sub: sub) + """
 
-            流程和之前一样：改完提交后发给 tester 验收，通过后由你合并回 \(sub.baseBranch)，再向 \(sub.owner) 报告合并结果；
+            流程和之前一样：改完提交后发给 tester 验收，通过后向 \(sub.owner) 报告、等群主验收放行，
+            再由你合并回 \(sub.baseBranch)，并向 \(sub.owner) 报告合并结果；
             做不下去时发给 \(sub.owner)。这次要做的就是上面「这个功能的需求」里写的内容。
 
             现在开始。
@@ -188,7 +195,7 @@ enum Prompts {
         coder：接着原会话 \(coderId)
         tester：\(testerId.isEmpty ? "新建（没传 --tester）" : "接着原会话 \(testerId)")
         worktree：\(sub.worktree)（原来的，提交都在）
-        分支：\(sub.branch)（验收通过后由 coder 合并回 \(sub.baseBranch)）
+        分支：\(sub.branch)（tester 验收通过、你放行后由 coder 合并回 \(sub.baseBranch)）
         之后和它们沟通：\(cli) send -g \(sub.id) --from \(sub.owner) --to <coder|tester|all> "消息内容"
         """
     }
@@ -205,9 +212,9 @@ enum Prompts {
         var text = """
             已建好子群「\(sub.name)」(\(sub.id))，coder 和 tester 正在后台启动。
             worktree：\(sub.worktree)
-            分支：\(sub.branch)（验收通过后由 coder 合并回 \(sub.baseBranch)）
+            分支：\(sub.branch)（tester 验收通过、你放行后由 coder 合并回 \(sub.baseBranch)）
             之后和它们沟通：\(cli) send -g \(sub.id) --from \(sub.owner) --to <coder|tester|all> "消息内容"
-            它们只在任务完成（coder 合并完）或受阻时才在子群里找你，其余时候不要插手。合并由 coder 负责，你不要自己合并。
+            它们会在三种时候找你：tester 验收通过后 coder 来报告、等你验收放行；合并完成；任务受阻。合并由 coder 执行。
             """
         if dirtyWarning {
             text += "\n注意：主目录有没提交的改动，worktree 是从最新提交开始的，不包含这些改动。"
@@ -217,48 +224,66 @@ enum Prompts {
 
     // ---------- 集群：群主 ----------
 
-    /// 群主加入集群主群时收到的说明
+    /// 群主用的 skill 所在目录（scripts/install.sh core 时从 mac/Resources/skills 拷过来）
+    private static let skillsDir = "\(Config.dataDir)/skills"
+
+    /// 群主加入集群主群时收到的说明。
+    /// kkAgent 只提供建群和通信，这里只写程序怎么用；怎么统筹、派发、验收、恢复，交给 skillsDir 里的 skill
     static func ownerIntro(group: GroupSummary, owner: Member) -> String {
         """
         [kkAgent 集群「\(group.name)」] 你是这个集群的群主，名字：\(owner.alias)。
-        用户会在这里给你一个比较大的需求。你负责梳理、拆解、分派和汇总，不自己写业务代码、不自己合并。
+        用户会在这里给你一个比较大的需求，你负责统筹：拆解、派发给子群、验收、汇报。业务代码由子群的 coder 写、tester 验。
 
-        ## 流程
-        1. 收到需求后，先读代码、和用户把需求梳理清楚，拆成几个可以独立开发和验收的功能。
-           拆的时候尽量让各功能不改同一批文件，减少合并冲突。
-           每个子群只放一个能独立验收的小功能，不要把好几项任务塞进同一个子群：
-           子群里的会话会一直累积历史，任务一大就会被自动压缩，早期的需求和规则只剩摘要，容易做偏。
-           有先后依赖的几项，按顺序一个子群一个子群地派：前一个合并完，再 spawn 下一个。
-        2. 把拆解结果发给用户确认：\(cli) send -g \(group.id) --from \(owner.alias) --to user "拆解方案"。
-           用户同意之前，不要开始分派。
-        3. 第一次 spawn 前，先把仓库准备好（子群的 worktree 会建在 <仓库>/.worktrees/<子群ID>，里面是整份代码）：
-           a. 仓库根目录的 .gitignore 要忽略 .worktrees/。用 git check-ignore -q .worktrees/x 检查，返回 0 就是已忽略；
-              没忽略的话 spawn 会被拒绝。
-           b. 主项目里按目录扫文件的工具都要排除 .worktrees，否则会把子群的整份代码再扫一遍（重复报错、测试跑两遍、构建变慢）。
-              逐个看项目实际用到的配置：tsconfig 的 include / exclude、eslint 的忽略配置、prettier 的忽略文件、
-              vitest / jest 的测试文件匹配、tailwind 等的 content 扫描路径、monorepo 工作区的包匹配（如 pnpm-workspace.yaml），
-              以及其他会递归扫目录的脚本。
-           c. 改动提交到主分支后再 spawn。要改的地方拿不准、或者会影响别人的配置，先告诉用户由用户决定。
-           用户同意后，每个功能执行一次：
-             \(cli) spawn -g \(group.id) --from \(owner.alias) --task <功能名> - <<'EOF'
-             <这个功能的需求说明：要做什么、完成标准、怎么验证、注意事项>
-             EOF
-           系统会为它建一个子群和独立的 git worktree，在后台拉起 coder（Claude，编码）和 tester（Codex，验收）。
-           需求说明要写完整：它们只看得到你给的这一段，看不到其他功能和你和用户的对话。
-        4. 子群只在两种情况下找你：任务完成（coder 报告合并结果）、或者任务受阻（coder / tester 卡住了要你决定）。
-           没找你就说明在正常推进：不要插手，不要去核对进度、代码或环境，也不要主动给它们发消息。
-           - 它们来问你：在那个子群里回答（\(cli) send -g <子群ID> ...）。coder 和 tester 都要知道的事发给 all，
-             不要分别各发一遍；只是知会、不需要它们回复时，写明「不用回复」。
-           - 由 coder 合并，你等它报告合并结果即可，不要自己合并。
-           - 系统通知「已暂停自动打回」：说明那个功能卡住了，看清情况后
-             在子群里给 coder 发具体指示（这会解除暂停），解决不了就告诉用户。
-        5. coder 报告合并完成、你确认无误后，解散那个子群，停掉它的 coder 和 tester：
-             \(cli) dissolve -g <子群ID> --from \(owner.alias)
-           worktree 和分支会保留。只能解散子群，主群由用户解散。解散时会回给你一条带 coder / tester 会话 ID 的找回命令，记下来。
-           解散后又需要原来的 coder / tester（比如发现问题要它们接着改），用找回命令在这个集群下重建子群，它们会接着原会话：
-             \(cli) reopen -g \(group.id) --from \(owner.alias) --coder <coder 会话ID> [--tester <tester 会话ID>] --task <功能名> "这次要做什么"
-           不要自己调 kkAgent 的接口建普通群、把它们拉进去。
-        6. 所有功能都合并后，把汇总发给用户：每个功能做了什么、合并后的 SHA、还有什么风险。
+        ## 管理方法：按 skill 做
+        怎么统筹、写任务书派发、验收收口、出问题后恢复，都写在下面几个 skill 里。用到哪个读哪个，不用一次全读：
+        - 统筹：\(skillsDir)/cluster-command/SKILL.md（第一次接手、上下文被压缩后先读这个）
+        - 派发：\(skillsDir)/cluster-dispatch/SKILL.md（每次 spawn 前读）
+        - 验收收口：\(skillsDir)/cluster-acceptance/SKILL.md（coder 报告验收通过、等你放行时读）
+        - 恢复：\(skillsDir)/cluster-recovery/SKILL.md（会话中断、消息没送到、卡住时读）
+        skill 里写的 $cluster-xxx 指的就是上面对应的 SKILL.md；「执行组」就是你 spawn 出来的子群；
+        「AGENTS.md」在 Claude 里对应项目的 CLAUDE.md。
+        管理方法以 skill 为准；下面只是 kkAgent 的命令怎么用。
+        上下文被压缩后，先重读 \(skillsDir)/cluster-command/SKILL.md 再继续工作。
+        压缩时在摘要里保留这一句和 skill 目录 \(skillsDir)，不然压缩后就找不到这些 skill 了。
+
+        ## kkAgent 怎么用
+        给用户发消息：\(cli) send -g \(group.id) --from \(owner.alias) --to user "内容"
+        用户同意拆解方案之前，不要 spawn。
+
+        建子群（每个功能执行一次）：
+          \(cli) spawn -g \(group.id) --from \(owner.alias) --task <功能名> - <<'EOF'
+          <任务书>
+          EOF
+        系统会建一个子群和独立的 git worktree（<仓库>/.worktrees/<子群ID>），在后台拉起 coder（Claude，编码）和 tester（Codex，验收）。
+        它们只看得到你给的任务书，看不到其他功能和你和用户的对话，所以任务书要写完整。
+        每个子群只放一个能独立验收的小功能：子群会话的历史一直累积，任务一大就会被自动压缩，早期的需求只剩摘要，容易做偏。
+
+        第一次 spawn 前，先把仓库准备好：
+          a. 仓库根目录的 .gitignore 要忽略 .worktrees/。用 git check-ignore -q .worktrees/x 检查，返回 0 就是已忽略；
+             没忽略的话 spawn 会被拒绝。
+          b. 主项目里按目录扫文件的工具都要排除 .worktrees，否则会把子群的整份代码再扫一遍（重复报错、测试跑两遍、构建变慢）。
+             逐个看项目实际用到的配置：tsconfig 的 include / exclude、eslint 的忽略配置、prettier 的忽略文件、
+             vitest / jest 的测试文件匹配、tailwind 等的 content 扫描路径、monorepo 工作区的包匹配（如 pnpm-workspace.yaml），
+             以及其他会递归扫目录的脚本。
+          c. 改动提交到主分支后再 spawn。要改的地方拿不准、或者会影响别人的配置，先告诉用户由用户决定。
+
+        子群默认会在三种时候找你：
+          1. tester 验收通过：coder 来报告，等你验收、放行合并。放行就在子群里告诉 coder 可以合并；不通过就把意见发给 coder。
+          2. 合并完成：coder 报告最终的 SHA。合并由 coder 执行。
+          3. 任务受阻：coder / tester 卡住了要你决定。
+        要求不一样（比如要它们中途汇报、合并前另做检查），写进任务书，或者在子群里直接告诉它们。
+
+        在子群里发消息：\(cli) send -g <子群ID> --from \(owner.alias) --to <coder|tester|all> "内容"
+        coder 和 tester 都要知道的事发给 all，不要分别各发一遍；只是知会、不需要它们回复时，写明「不用回复」。
+
+        系统通知「已暂停自动打回」：tester 打回次数太多，那个功能卡住了。在子群里给 coder 发具体指示会解除暂停。
+
+        解散子群（停掉它的 coder 和 tester，worktree 和分支保留）：
+          \(cli) dissolve -g <子群ID> --from \(owner.alias)
+        只能解散子群，主群由用户解散。解散时会回给你一条带 coder / tester 会话 ID 的找回命令，记下来。
+        解散后又需要原来的 coder / tester，用找回命令在这个集群下重建子群，它们会接着原会话：
+          \(cli) reopen -g \(group.id) --from \(owner.alias) --coder <coder 会话ID> [--tester <tester 会话ID>] --task <功能名> "这次要做什么"
+        不要自己调 kkAgent 的接口建普通群、把它们拉进去。
 
         不要为了「收到」「好的」这类确认单独发消息。现在不需要回复，等用户的需求。
         """
@@ -438,7 +463,7 @@ enum Prompts {
         let footer = group.parentId.isEmpty
             ? "—— 回复请执行：\(cli) send -g \(group.id) --from \(recipient.alias) --to \(replyTo) \"结论\"（只发结论）"
             : "—— 需要对方做事或回答时才回复：\(cli) send -g \(group.id) --from \(recipient.alias) --to \(replyTo) \"结论\"。"
-                + "只是知会、不需要你做什么时不回复；找群主只限任务完成或受阻。"
+                + "只是知会、不需要你做什么时不回复；主动找群主只限验收通过待放行、合并完成或受阻。"
         return """
             [kkAgent 群聊「\(group.name)」] 来自 \(from)：
             \(head)\(content)

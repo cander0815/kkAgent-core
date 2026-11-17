@@ -20,6 +20,11 @@ install_core() {
   cp build/kkagent-core "$DATA/bin/kkagent-core.new"
   mv -f "$DATA/bin/kkagent-core.new" "$DATA/bin/kkagent-core"
 
+  # 群主用的 skill（统筹、派发、验收、恢复）拷到 ~/.kkagent/skills/，群主说明里会告诉它这个路径。
+  # 只覆盖仓库里有的文件，用户自己加的项目适配（如 cluster-command/references/<项目>.md）不会被删
+  mkdir -p "$DATA/skills"
+  cp -R Resources/skills/. "$DATA/skills/"
+
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
