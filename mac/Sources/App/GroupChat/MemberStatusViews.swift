@@ -59,6 +59,8 @@ struct PendingDeliveriesSheet: View {
     let alias: String
     let memberId: Int64
     @StateObject private var expanded = LocalState<Set<Int64>>([]) // 展开着的消息 id
+    @StateObject private var busy = LocalState(false)               // 正在取消 / 强制发送
+    @StateObject private var errorText = LocalState<String?>(nil)   // 上一次操作失败的原因
 
     /// 还在排队的消息，按排队先后；找不到原文的（理论上不会）跳过
     private var items: [Message] {
@@ -73,7 +75,7 @@ struct PendingDeliveriesSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(alias) 排队中的消息（\(items.count) 条）").font(.title3)
-            Text("等它空闲后会合并成一轮送进去；紧急消息排在前面。")
+            Text("等它空闲后会合并成一轮送进去；紧急消息排在前面。也可以取消某条，或不等它空闲、强制单独送进去。")
                 .font(.caption).foregroundStyle(.secondary)
             if items.isEmpty {
                 Text("没有排队的消息了，可能刚刚已经送出去。")
@@ -88,6 +90,9 @@ struct PendingDeliveriesSheet: View {
                     }
                 }
                 .frame(maxHeight: 460)
+            }
+            if let error = errorText.value {
+                Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()
@@ -136,10 +141,42 @@ struct PendingDeliveriesSheet: View {
                 .foregroundStyle(open ? .primary : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+
+            // 取消：这条不再发给它；强制发送：不等它空闲，马上单独送进去
+            if let deliveryId = deliveryId(of: message.id) {
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("取消") { run { await model.cancelDelivery(deliveryId) } }
+                        .tip("这条不再发给 \(alias)")
+                        .clickable()
+                    Button("强制发送") { run { await model.forceSendDelivery(deliveryId) } }
+                        .tip("不等 \(alias) 空闲，马上把这一条送进去")
+                        .clickable()
+                }
+                .controlSize(.small)
+                .disabled(busy.value) // 处理期间不让连点（强制发送最多要等几十秒）
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.07)))
+    }
+
+    /// 这条消息发给这个成员的那条投递的 id；入群说明那条不能取消、不能强制发送，返回 nil（不显示按钮）
+    private func deliveryId(of messageId: Int64) -> Int64? {
+        model.detail?.deliveries.first {
+            $0.memberId == memberId && $0.messageId == messageId && $0.status == .pending && !$0.isBootstrap
+        }?.id
+    }
+
+    /// 执行取消 / 强制发送：期间按钮置灰，失败的原因显示在弹窗里
+    private func run(_ action: @escaping () async -> String?) {
+        busy.value = true
+        errorText.value = nil
+        Task {
+            errorText.value = await action()
+            busy.value = false
+        }
     }
 }
 

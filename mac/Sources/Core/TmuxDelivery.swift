@@ -15,6 +15,9 @@ enum AttemptOutcome {
     case confirmed               // 确认对方收到了
     case unconfirmed(String)     // 写进去了，但没能确认（原因）
     case deferred(String)        // 还没写就放弃了，消息改回排队（原因）
+    /// 强制发送时对方正在忙：已经写进去了，排在它当前这一轮之后，还没轮到处理，所以按时确认不了。
+    /// 照样记成「已写入未确认」（挡着后面的投递、定时检查会补确认），但这是意料之中的，不发未确认通知
+    case queuedBehindTurn
 }
 
 extension DeliveryQueue {
@@ -22,8 +25,8 @@ extension DeliveryQueue {
     static func attemptTag(_ attemptId: Int64) -> String { "[kk#\(attemptId)]" }
 
     /// 按成员的投递方式送进去。还没开始写入时出的错照常抛出（算投递失败，可以重投）
-    func deliverWithAttempt(member: Member, attemptId: Int64, text: String) throws -> AttemptOutcome {
-        if !member.tmux.isEmpty { return try deliverViaTmux(member: member, attemptId: attemptId, text: text) }
+    func deliverWithAttempt(member: Member, attemptId: Int64, text: String, force: Bool = false) throws -> AttemptOutcome {
+        if !member.tmux.isEmpty { return try deliverViaTmux(member: member, attemptId: attemptId, text: text, force: force) }
         switch member.agent {
         case .codex:
             // 桌面端 Codex：codex queue 一调用就可能已经进了对方的队列，之后出什么错都只能算「未确认」。
@@ -36,8 +39,8 @@ extension DeliveryQueue {
                 return .unconfirmed("codex queue 出错：\(error)")
             }
             _ = try? repo.advanceAttempt(attemptId, to: .inputAccepted) // 记不上也没关系：停在「开始写入」同样按已写入处理
-            return waitForConfirmation(member: member, attemptId: attemptId, text: text, timeout: 20)
-                ? .confirmed : .unconfirmed("交给 codex queue 后 20 秒内没在会话记录里看到这一条")
+            if waitForConfirmation(member: member, attemptId: attemptId, text: text, timeout: 20) { return .confirmed }
+            return force && stillWorking(member) ? .queuedBehindTurn : .unconfirmed("交给 codex queue 后 20 秒内没在会话记录里看到这一条")
         case .claude:
             // 开着窗口的 Claude：中转会话会核对 SendMessage 的回执（成功并且预览就是这条消息的开头），回执就是确认
             let live = Transcript.claudeLiveStatus(sessionId: member.sessionId, vm: member.vm)
@@ -61,7 +64,7 @@ extension DeliveryQueue {
     // ---------- tmux ----------
 
     /// text 里的 ESC 已经在 Delivery.deliver 换成了可见的 ␛（库里存的就是这份实际发出去的文字）
-    private func deliverViaTmux(member: Member, attemptId: Int64, text: String) throws -> AttemptOutcome {
+    private func deliverViaTmux(member: Member, attemptId: Int64, text: String, force: Bool) throws -> AttemptOutcome {
         // 这次新开的会话：界面就绪就能确定是空闲的（状态 hook 还没来得及上报）
         let freshlyStarted = try ensureTmuxSession(member)
 
@@ -78,7 +81,7 @@ extension DeliveryQueue {
             return .deferred("看不到输入框（可能弹着确认框）")
         }
         guard before.isEmpty else { return .deferred("输入框里有没提交的文字，可能有人在操作") }
-        if let blocked = writeBlocker(member: member, target: target) { return .deferred(blocked) }
+        if let blocked = writeBlocker(member: member, target: target, force: force) { return .deferred(blocked) }
 
         // 3. 记「开始写入」再粘贴：从这一刻起，出任何问题都只能算「未确认」。
         //    「开始写入」记不进库就抛错（算还没写入），绝不能先写终端：崩溃后会被当成没写过而重投
@@ -86,7 +89,7 @@ extension DeliveryQueue {
         try repo.advanceAttempt(attemptId, to: .writeStarted)
         // 记库期间对方可能变了（人先开始了新的一轮、弹了授权框……）：粘贴前再查一次。
         // 这时还没往终端写任何东西，作废这次尝试，消息回到排队
-        if let blocked = writeBlocker(member: member, target: target) {
+        if let blocked = writeBlocker(member: member, target: target, force: force) {
             repo.cancelAttempt(attemptId, evenIfWriteStarted: true)
             return .deferred(blocked)
         }
@@ -104,7 +107,7 @@ extension DeliveryQueue {
 
         // 5. 回车前最后核对：目标没变、对方仍然空闲、成员没被移出、核心没在退出，
         //    并且输入框和刚才记下的原样完全一样（人改过任何一个字、缩进、空行都不按，防止把别人改过的内容发出去）
-        if let blocked = writeBlocker(member: member, target: target, beforeEnter: true) { return .unconfirmed("\(blocked)，没有按回车") }
+        if let blocked = writeBlocker(member: member, target: target, beforeEnter: true, force: force) { return .unconfirmed("\(blocked)，没有按回车") }
         guard Composer.rawBox(agent: member.agent, styledScreen: Tmux.styledScreen(pane)) == pasted else {
             return .unconfirmed("回车前输入框里的内容变了，没有按回车")
         }
@@ -117,7 +120,20 @@ extension DeliveryQueue {
 
         // 6. 确认送达。不自动补按回车：拿不出「输入框里就是这次的内容、没人动过」的可靠证据，宁可记未确认交给人处理
         if waitForConfirmation(member: member, attemptId: attemptId, text: text, timeout: 15) { return .confirmed }
+        if force && stillWorking(member) { return .queuedBehindTurn }
         return .unconfirmed("回车后 15 秒内没能确认对方收到")
+    }
+
+    /// 强制发送后没能按时确认时用：对方是不是仍在干活（消息排在它当前这一轮之后，还没轮到处理）。
+    /// 只认「明确在忙」；状态未知、已经空闲都返回 false（空闲了还确认不了，说明真有问题，要照常通知）
+    private func stillWorking(_ member: Member) -> Bool {
+        switch member.agent {
+        case .claude:
+            return AgentStatusStore.shared.cachedState(of: member) == .working
+        case .codex:
+            return CodexTurns.shared.isBusy(sessionId: member.sessionId, forWrite: true,
+                                            startedAfter: CodexTurns.processStart(tmux: member.tmux)) == true
+        }
     }
 
     /// 用户是不是暂停了自动投递：每次写之前都从库里重新读（投递开始后用户才点暂停的情况要拦住），读不到也当作暂停
@@ -136,7 +152,8 @@ extension DeliveryQueue {
 
     /// 往窗格里写之前的检查，有问题返回原因：核心正在退出、成员已被移出 / 子群已解散、窗格或会话变了、对方已经不空闲。
     /// beforeEnter：回车前的那次检查（输入框里已经是我们贴的内容）
-    private func writeBlocker(member: Member, target: WriteTarget, beforeEnter: Bool = false) -> String? {
+    /// force：用户要求强制发送，对方「正在干活」不算拦截（其他检查照旧；Claude / Codex 会把输入排在当前这一轮之后）
+    private func writeBlocker(member: Member, target: WriteTarget, beforeEnter: Bool = false, force: Bool = false) -> String? {
         if isStopping { return "核心正在退出" }
         if isCancelled(member.id) { return "成员已被移出或子群已解散" }
         if let blocked = pausedBlocker(member) { return blocked }
@@ -148,7 +165,7 @@ extension DeliveryQueue {
             switch AgentStatusStore.shared.cachedState(of: member) {
             case .idle: return nil
             case .waitingPermission: return "弹出了授权框"
-            case .working: return "对方已经开始干活（可能有人在终端里先发了消息）"
+            case .working: return force ? nil : "对方已经开始干活（可能有人在终端里先发了消息）"
             case .unknown:
                 // 这次刚开的会话还没上报过状态：不受旧会话记录（可能停在上次被杀时的半轮）约束，
                 // 但必须看当前屏幕正面是空闲的（没有弹框、没有忙碌动画、输入框认得出来）。回车前只忽略我们刚贴进去的草稿
@@ -166,7 +183,7 @@ extension DeliveryQueue {
                                             startedAfter: CodexTurns.processStart(tmux: member.tmux)) {
             case false: return nil
             case nil where target.freshlyStarted: return nil
-            case true: return "对方已经开始干活（可能有人在终端里先发了消息）"
+            case true: return force ? nil : "对方已经开始干活（可能有人在终端里先发了消息）"
             default: return "对方状态未知"
             }
         }

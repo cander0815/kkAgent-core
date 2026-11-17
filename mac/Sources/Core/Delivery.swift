@@ -59,6 +59,20 @@ final class DeliveryQueue {
         queue(for: member).async { self.deliver(deliveryId: deliveryId, memberId: member.id) }
     }
 
+    /// 用户在排队列表里点「强制发送」：不等对方空闲，马上把这一条（只这一条，不合并别的）送进去。
+    /// 只放宽「对方正在干活」这一道门；暂停、弹着授权框、有未确认的投递挡着、输入框里有人在打字，这些照样会拦住（消息继续排队）
+    /// 最多等 4 秒再返回（界面的请求 5 秒超时）：返回 false = 处理完了这条仍在排队（被上面那些检查拦住了），界面要告诉用户。
+    /// 拦截都发生在真正写入之前，通常 1 秒内就有结果；4 秒还没处理完，说明已经在写入或在等对方确认收到，算已开始发送
+    func forceSend(deliveryId: Int64, member: Member) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        queue(for: member).async {
+            self.deliver(deliveryId: deliveryId, memberId: member.id, force: true)
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 4) == .success else { return true }
+        return repo.queuedDelivery(deliveryId)?.status != .pending
+    }
+
     private func key(for member: Member) -> QueueKey {
         member.headless && member.agent == .codex
             ? .member(member.id)
@@ -80,7 +94,7 @@ final class DeliveryQueue {
     /// 现在能不能往这个成员投。在会话自己的串行队列里调用，所以同一个会话不会有两次判断同时进行。
     /// 上一条交出去后，要么已经确认收到（对方这时已经在干活，会被判成忙），要么记成「已写入未确认」挡在这里，
     /// 所以不需要别的「在途」标记
-    private func canDeliverNow(_ member: Member, _ readiness: Readiness) -> Bool {
+    private func canDeliverNow(_ member: Member, _ readiness: Readiness, force: Bool = false) -> Bool {
         // 这个会话上有「已写入未确认」的投递：不再派新的，等迟到的确认或人工「解除并继续」。
         // 读库出错时也不投：查不清楚有没有阻挡，宁可等下一次
         do {
@@ -89,7 +103,8 @@ final class DeliveryQueue {
             log("\(member.alias)：查投递阻挡时数据库出错，这次先不投：\(error)")
             return false
         }
-        return readiness == .idle
+        // 强制发送只放宽「忙」，「状态未知」照样不投；真正写进去之前，TmuxDelivery 里还有一遍检查（授权框、输入框里有字等照样拦）
+        return readiness == .idle || (force && readiness == .busy)
     }
 
     /// 重新打开 tmux 成员的会话（用户在终端里 exit 了），接着原来的会话，不发任何消息。
@@ -207,7 +222,8 @@ final class DeliveryQueue {
     }
 
     /// afterInterrupt：刚为紧急消息打断了对方、确认这一轮已经结束，回来重新走一遍（这一遍不再打断）
-    private func deliver(deliveryId: Int64, memberId: Int64, afterInterrupt: Bool = false) {
+    /// force：用户要求强制发送这一条，不等对方空闲，也不和别的排队消息合并
+    private func deliver(deliveryId: Int64, memberId: Int64, afterInterrupt: Bool = false, force: Bool = false) {
         // 排队期间群被解散、或这个成员被移出了，投递记录会被删掉，这里就不再投递；
         // 已经不是「排队中」，说明它在前面某一轮里被合并送出去了
         guard let first = repo.queuedDelivery(deliveryId), first.status == .pending else { return }
@@ -229,7 +245,7 @@ final class DeliveryQueue {
 
         // 对方忙、状态未知、或者上一条还在途：消息留在排队里，等唤醒（Stop hook / 定时检查）
         let readiness = MemberReadiness.check(member, bootstrap: first.purpose == .bootstrap)
-        if let readiness, !canDeliverNow(member, readiness) {
+        if let readiness, !canDeliverNow(member, readiness, force: force) {
             // 对方正在干活、排队里有紧急消息：按一次 Esc 打断。确认这一轮结束了就重新走一遍普通流程（所有门禁照样检查）
             if readiness == .busy, !afterInterrupt, first.purpose != .bootstrap, interruptIfUrgent(member) {
                 deliver(deliveryId: deliveryId, memberId: memberId, afterInterrupt: true)
@@ -242,10 +258,11 @@ final class DeliveryQueue {
         // 要在确认对方空闲之后才取，这样等待期间新来的消息也都会并进来。
         // tester 的入群说明（bootstrap）要单独送：只有它能新建 Codex 会话，而且那一轮要求立即结束
         // 紧急消息（第 6 步）排在前面：紧急一组、普通一组，组内保持原来的先后顺序
-        let pending = first.purpose == .bootstrap
+        let pending = first.purpose == .bootstrap || force
             ? [first]
             : repo.pendingDeliveries(memberId: member.id).filter { $0.purpose != .bootstrap }
-        let batch = pending.filter(\.urgent) + pending.filter { !$0.urgent }
+        // 逐条认领（排队中 → 投递中）：这一刻用户刚好点了「取消」的那条认领不到，就不送了
+        let batch = (pending.filter(\.urgent) + pending.filter { !$0.urgent }).filter { repo.claimDelivery($0.id) }
         guard !batch.isEmpty else { return }
         let items = batch.map {
             Prompts.MergedItem(text: $0.text.isEmpty ? rebuildText($0, recipient: member) : $0.text, urgent: $0.urgent, sentAt: $0.sentAt)
@@ -256,7 +273,6 @@ final class DeliveryQueue {
         if let note { text = Prompts.interruptNote(note) + "\n\n" + text }
         if batch.count > 1 { log("合并投递给 \(member.alias)：\(batch.count) 条排队消息合成一轮") }
 
-        batch.forEach { repo.setDeliveryStatus($0.id, .running) }
         setRunning(member.id, true)
         defer { setRunning(member.id, false) }
         var turnError: Error?
@@ -270,12 +286,16 @@ final class DeliveryQueue {
                 // 库里存的就是这份实际发出去的文字，之后补确认也拿它比对
                 let tagged = (Self.attemptTag(id) + "\n" + text).replacingOccurrences(of: "\u{1b}", with: "␛")
                 try repo.setAttemptText(id, text: tagged)
-                switch try deliverWithAttempt(member: member, attemptId: id, text: tagged) {
+                switch try deliverWithAttempt(member: member, attemptId: id, text: tagged, force: force) {
                 case .confirmed:
                     break // 确认时已经把投递改成已送达（Repository.confirmAttempt）
                 case .unconfirmed(let reason):
                     // 写进去了但没能确认：不重投，这个会话之后的消息先不投，等迟到的确认或人工「解除并继续」。
                     recordUnconfirmed(member: member, attemptId: id, reason: reason)
+                case .queuedBehindTurn:
+                    // 强制发送、对方还在忙：意料之中的未确认，记库但不通知，等它处理这一条时定时检查会补确认
+                    recordUnconfirmed(member: member, attemptId: id, notify: false,
+                                      reason: "强制发送时它正在忙，这条排在它当前这一轮之后，等它处理时会自动确认")
                 case .deferred(let reason):
                     // 还没写就放弃了：这批消息改回排队，之后再投
                     repo.cancelAttempt(id)
@@ -311,7 +331,8 @@ final class DeliveryQueue {
     /// - 条件没命中 → 等待的这 15 秒里定时补确认已经抢先确认了，不报未确认；
     /// - 写库出错（比如数据库被锁）→ 不在这里硬等。这一条仍是「投递中」、继续挡着后续投递（不能当成已确认），
     ///   定时检查（retryUnconfirmedRecords）会再补记；补记之前已经被补确认的，就不会再被找出来，也就不会误报
-    private func recordUnconfirmed(member: Member, attemptId: Int64, reason: String) {
+    /// notify：false = 意料之中的未确认（强制发送时对方在忙），只记库不通知
+    private func recordUnconfirmed(member: Member, attemptId: Int64, notify: Bool = true, reason: String) {
         do {
             guard try repo.markAttemptUnconfirmed(attemptId, reason: reason) else {
                 log("投递 \(Self.attemptTag(attemptId)) 等待期间已被补确认，不再报未确认")
@@ -319,6 +340,10 @@ final class DeliveryQueue {
             }
         } catch {
             log("投递 \(Self.attemptTag(attemptId)) 记成未确认时数据库出错，稍后定时检查补记：\(error)")
+            return
+        }
+        guard notify else {
+            log("给 \(member.alias) 的强制发送已写入，它还在忙，等它处理时再确认：\(Self.attemptTag(attemptId))")
             return
         }
         // 状态记上了，通知本身也要写库：写不进去就放进待补发列表，不能悄悄丢掉

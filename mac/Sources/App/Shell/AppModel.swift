@@ -183,6 +183,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 取消一条排队中的消息（对方不会收到）。失败返回原因（排队弹窗盖在主界面上，原因要显示在弹窗里，所以不走全局弹窗）
+    func cancelDelivery(_ deliveryId: Int64) async -> String? {
+        await performReturningError { try await api.delete("/api/deliveries/\(deliveryId)") }
+    }
+
+    /// 强制发送一条排队中的消息：不等对方空闲，马上送进去。失败返回原因
+    func forceSendDelivery(_ deliveryId: Int64) async -> String? {
+        await performReturningError {
+            let _: OkResult = try await api.post("/api/deliveries/\(deliveryId)/force", [String: String]())
+        }
+    }
+
+    private func performReturningError(_ action: () async throws -> Void) async -> String? {
+        var failure: String?
+        do { try await action() } catch { failure = error.localizedDescription }
+        await refresh()
+        return failure
+    }
+
     func removeMember(_ id: Int64) async {
         await perform { try await api.delete("/api/members/\(id)") }
         if selectedMemberId == id { selectMember(nil) }

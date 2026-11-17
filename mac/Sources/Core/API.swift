@@ -230,6 +230,23 @@ final class API {
             if !body.paused { delivery.wake(memberId: member.id) } // 恢复后马上把排着的消息送进去（对方空闲的话）
             return .json(OkResult())
         }
+        // 排队列表里的「取消」和「强制发送」：只针对还在排队的普通消息（入群说明不能动，成员没它就启动不起来）
+        if let p = match("DELETE", "api/deliveries/:id") {
+            let queued = try requirePendingDelivery(p[0])
+            guard try repo.cancelPendingDelivery(queued.id) else { throw UserError("这条消息刚好已经在送了，取消不了") }
+            log("用户取消了一条排队中的消息（投递 \(queued.id)）")
+            return .json(OkResult())
+        }
+        if let p = match("POST", "api/deliveries/:id/force") {
+            let queued = try requirePendingDelivery(p[0])
+            guard let member = try repo.getMember(queued.memberId) else { throw UserError("成员不存在") }
+            guard !member.paused else { throw UserError("\(member.alias) 已暂停自动投递，先恢复再强制发送") }
+            log("用户要求强制发送给 \(member.alias) 的排队消息（投递 \(queued.id)）")
+            guard self.delivery.forceSend(deliveryId: queued.id, member: member) else {
+                throw UserError("没能强制发送，消息仍在排队：\(member.alias) 可能弹着授权框、输入框里有没提交的文字、状态不明、有一条未确认的投递或还没结算的打断挡着，或者托管的 Codex 会话还没建好")
+            }
+            return .json(OkResult())
+        }
         if let p = match("POST", "api/attempts/:id/release") {
             // 只解除调度上的阻挡：这次投递仍是「已写入未确认」，绝不改成送达，也不重投
             guard let attempt = repo.getAttempt(Int64(p[0]) ?? -1) else { throw UserError("投递尝试不存在") }
@@ -273,6 +290,15 @@ final class API {
     private func requireGroup(_ gid: String) throws -> GroupSummary {
         guard let group = try repo.getGroup(gid) else { throw UserError("群聊 \(gid) 不存在") }
         return group
+    }
+
+    /// 取一条「排队中」的普通投递；已经送出 / 不存在 / 是入群说明都报错
+    private func requirePendingDelivery(_ id: String) throws -> Repository.QueuedDelivery {
+        guard let queued = repo.queuedDelivery(Int64(id) ?? -1), queued.status == .pending else {
+            throw UserError("这条消息已经不在排队了，可能刚刚送出去了")
+        }
+        guard queued.purpose != .bootstrap else { throw UserError("入群说明不能取消或强制发送") }
+        return queued
     }
 
     private func groupDetail(_ gid: String) throws -> GroupDetail {

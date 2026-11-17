@@ -274,9 +274,10 @@ public struct Delivery: Codable, Identifiable, Hashable, Sendable {
     public let updatedAt: String
     public let attemptId: Int64       // 属于哪一次投递尝试（「解除并继续」要用）；0 = 不需要确认的投递方式
     public let attemptReleased: Bool  // 那次尝试已经被人工「解除并继续」过
+    public let isBootstrap: Bool      // 入群说明那一条：不能取消、不能强制发送
 
     public init(id: Int64, messageId: Int64, memberId: Int64, memberAlias: String, status: DeliveryStatus, error: String, updatedAt: String,
-                attemptId: Int64, attemptReleased: Bool) {
+                attemptId: Int64, attemptReleased: Bool, isBootstrap: Bool = false) {
         self.id = id
         self.messageId = messageId
         self.memberId = memberId
@@ -286,6 +287,22 @@ public struct Delivery: Codable, Identifiable, Hashable, Sendable {
         self.updatedAt = updatedAt
         self.attemptId = attemptId
         self.attemptReleased = attemptReleased
+        self.isBootstrap = isBootstrap
+    }
+
+    // 旧核心返回的投递没有 isBootstrap 字段，按普通投递解码（界面和核心可能不是同一个版本）
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int64.self, forKey: .id)
+        messageId = try c.decode(Int64.self, forKey: .messageId)
+        memberId = try c.decode(Int64.self, forKey: .memberId)
+        memberAlias = try c.decode(String.self, forKey: .memberAlias)
+        status = try c.decode(DeliveryStatus.self, forKey: .status)
+        error = try c.decode(String.self, forKey: .error)
+        updatedAt = try c.decode(String.self, forKey: .updatedAt)
+        attemptId = try c.decode(Int64.self, forKey: .attemptId)
+        attemptReleased = try c.decode(Bool.self, forKey: .attemptReleased)
+        isBootstrap = try c.decodeIfPresent(Bool.self, forKey: .isBootstrap) ?? false
     }
 }
 

@@ -336,6 +336,7 @@ final class Repository {
     struct QueuedDelivery {
         let id: Int64
         let messageId: Int64
+        let memberId: Int64
         let status: DeliveryStatus
         let purpose: DeliveryPurpose
         let text: String // 老记录（加这一列之前建的）为空，要从消息内容重建
@@ -350,7 +351,7 @@ final class Repository {
         """
 
     private func queuedDelivery(_ r: Row) -> QueuedDelivery {
-        QueuedDelivery(id: r.int("id"), messageId: r.int("message_id"), status: DeliveryStatus(rawValue: r.text("status")) ?? .failed,
+        QueuedDelivery(id: r.int("id"), messageId: r.int("message_id"), memberId: r.int("member_id"), status: DeliveryStatus(rawValue: r.text("status")) ?? .failed,
                        purpose: DeliveryPurpose(rawValue: r.text("purpose")) ?? .task, text: r.text("text"),
                        urgent: r.int("urgent") != 0, sentAt: r.text("sent_at"))
     }
@@ -390,6 +391,19 @@ final class Repository {
         try db.run("DELETE FROM deliveries WHERE member_id = ? AND status = 'pending'", [.int(memberId)])
     }
 
+    /// 取消一条还在排队的投递（用户在排队列表里点「取消」）。只删「排队中」的：已经开始送的拦不住
+    /// 返回 false = 没删到（这条刚好被投递线程认领、已经在送了）
+    func cancelPendingDelivery(_ id: Int64) throws -> Bool {
+        try db.update("DELETE FROM deliveries WHERE id = ? AND status = 'pending'", [.int(id)]) > 0
+    }
+
+    /// 投递线程认领一条排队中的投递（改成「投递中」）。条件更新：用户刚好取消了（行已删）或别处已认领时返回 false，
+    /// 这样「取消」和「送出」只有一方能赢，不会出现显示取消成功、消息却照样送出去
+    func claimDelivery(_ id: Int64) -> Bool {
+        ((try? db.update("UPDATE deliveries SET status = 'running', error = '', updated_at = ? WHERE id = ? AND status = 'pending'",
+                         [.text(nowISO()), .int(id)])) ?? 0) > 0
+    }
+
     func setDeliveryStatus(_ id: Int64, _ status: DeliveryStatus, error: String = "") {
         _ = try? db.run("UPDATE deliveries SET status = ?, error = ?, updated_at = ? WHERE id = ?",
                     [.text(status.rawValue), .text(error), .text(nowISO()), .int(id)])
@@ -406,7 +420,8 @@ final class Repository {
             Delivery(id: r.int("id"), messageId: r.int("message_id"), memberId: r.int("member_id"),
                      memberAlias: r.text("member_alias"), status: DeliveryStatus(rawValue: r.text("status")) ?? .failed,
                      error: r.text("error"), updatedAt: r.text("updated_at"),
-                     attemptId: r.int("attempt_id"), attemptReleased: r.int("attempt_released") != 0)
+                     attemptId: r.int("attempt_id"), attemptReleased: r.int("attempt_released") != 0,
+                     isBootstrap: r.text("purpose") == DeliveryPurpose.bootstrap.rawValue)
         }
     }
 
