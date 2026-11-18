@@ -385,7 +385,7 @@ final class DeliveryQueue {
         guard let message = repo.getMessage(d.messageId), let group = try? repo.getGroup(message.groupId) else { return "" }
         if message.from == "system" { return message.content }
         let sender = (try? repo.listMembers(groupId: group.id))?.first { $0.alias == message.from }
-        return Prompts.delivered(group: group, sender: sender, recipient: recipient, content: message.content, verdict: message.verdict,
+        return Prompts.delivered(group: group, sender: sender, recipient: recipient, messageId: message.id, content: message.content, verdict: message.verdict,
                                  urgent: message.urgent, sentAt: message.createdAt)
     }
 

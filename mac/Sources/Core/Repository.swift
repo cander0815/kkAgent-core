@@ -47,6 +47,12 @@ final class Repository {
         try? db.exec("ALTER TABLE deliveries ADD COLUMN text TEXT NOT NULL DEFAULT ''")
         // 这条投递属于哪一次投递尝试（attempts 表）；0 = 老记录或不需要确认的投递方式
         try? db.exec("ALTER TABLE deliveries ADD COLUMN attempt_id INTEGER NOT NULL DEFAULT 0")
+        // 收件人什么时候把这条消息标成「已处理」（回复时带 --re，或执行 done）；空 = 还没处理，kkAgent inbox 会列出来
+        // 加这一列之前的老消息一律当作已处理：它们送进会话时没带编号，对不上号；列出来还可能让 agent 把旧指示再做一遍。
+        // 只在加列成功的那一次执行（列已存在时 ALTER 报错，不会走进来）
+        if (try? db.exec("ALTER TABLE deliveries ADD COLUMN handled_at TEXT NOT NULL DEFAULT ''")) != nil {
+            try db.exec("UPDATE deliveries SET handled_at = updated_at")
+        }
         // 投递尝试：一次把（可能合并了好几条的）文字送进对方会话的过程，记录走到了哪一步，见 TmuxDelivery.swift
         try db.exec("""
             CREATE TABLE IF NOT EXISTS attempts (
@@ -383,6 +389,55 @@ final class Repository {
 
     func getMessage(_ id: Int64) -> Message? {
         ((try? db.query("SELECT * FROM messages WHERE id = ?", [.int(id)])) ?? []).first.map(message)
+    }
+
+    // ---------- 收件箱（kkAgent inbox / done / send --re） ----------
+
+    /// 收件箱里的一条：发给某个成员的一条消息，连同送达状态和有没有处理
+    struct InboxItem {
+        let message: Message
+        let groupName: String
+        let status: DeliveryStatus
+        let handled: Bool
+    }
+
+    /// 列出发给这些成员（同一个人在主群和各子群里各有一条成员记录）的消息。
+    /// 系统通知（from = system）不算；direct = 只要点名发给自己的，不要 all 群发；
+    /// includeHandled = 已处理的也列（只取最近 limit 条）；否则只列还没处理的，全部列出、不截断（最早的那几条最可能是漏掉的）
+    func inbox(memberIds: [Int64], direct: Bool, includeHandled: Bool, limit: Int = 30) throws -> [InboxItem] {
+        guard !memberIds.isEmpty else { return [] }
+        let placeholders = memberIds.map { _ in "?" }.joined(separator: ",")
+        var sql = """
+            SELECT msg.*, g.name AS group_name, d.status AS delivery_status, d.handled_at FROM deliveries d
+            JOIN messages msg ON msg.id = d.message_id
+            JOIN groups g ON g.id = msg.group_id
+            WHERE d.member_id IN (\(placeholders)) AND msg.from_alias != 'system'
+            """
+        if direct { sql += " AND msg.to_alias != 'all'" }
+        if includeHandled {
+            // 取最近的 limit 条，再按时间正序显示
+            sql = "SELECT * FROM (\(sql) ORDER BY msg.id DESC LIMIT \(limit)) ORDER BY id"
+        } else {
+            sql += " AND d.handled_at = '' ORDER BY msg.id"
+        }
+        return try db.query(sql, memberIds.map { .int($0) }).map { r in
+            InboxItem(message: message(r), groupName: r.text("group_name"),
+                      status: DeliveryStatus(rawValue: r.text("delivery_status")) ?? .failed, handled: !r.text("handled_at").isEmpty)
+        }
+    }
+
+    /// 把发给这些成员的几条消息标成已处理。返回实际找到的消息编号（不是发给他们的编号不会出现在里面）
+    func markHandled(memberIds: [Int64], messageIds: [Int64]) throws -> [Int64] {
+        guard !memberIds.isEmpty, !messageIds.isEmpty else { return [] }
+        let members = memberIds.map { _ in "?" }.joined(separator: ",")
+        let messages = messageIds.map { _ in "?" }.joined(separator: ",")
+        let params: [SQLValue] = memberIds.map { .int($0) } + messageIds.map { .int($0) }
+        let found = try db.query("SELECT DISTINCT message_id FROM deliveries WHERE member_id IN (\(members)) AND message_id IN (\(messages))",
+                                 params).map { $0.int("message_id") }
+        // 已经标过的保留第一次的时间
+        try db.run("UPDATE deliveries SET handled_at = ? WHERE handled_at = '' AND member_id IN (\(members)) AND message_id IN (\(messages))",
+                   [.text(nowISO())] + params)
+        return found
     }
 
 

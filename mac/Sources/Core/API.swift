@@ -137,15 +137,31 @@ final class API {
             if req.isForm {
                 let form = req.formValues()
                 body = PostMessageRequest(from: form["from"] ?? "user", to: form["to"] ?? "", content: form["content"] ?? "",
-                                          verdict: form["verdict"], urgent: form["urgent"] == "1")
+                                          verdict: form["verdict"], urgent: form["urgent"] == "1", re: form["re"])
             } else {
                 body = try decode(PostMessageRequest.self, req)
             }
+            // --re 的编号先检查格式，写错了不发，免得消息发出去了才报错
+            let reIds = try parseMessageIds(body.re ?? "")
             let result = try postMessage(p[0], body)
             let names = result.recipients.isEmpty ? "用户" : result.recipients.joined(separator: "、")
             // 紧急消息不承诺「第一个送达」：可能已经有一批正在写入，或者被暂停、授权框、未确认挡着
             let note = result.message.urgent && !result.recipients.isEmpty ? "（已标为紧急，满足投递条件后优先合并送达）" : ""
-            return req.isForm ? .text("已发送给 \(names)\(note)") : .json(result)
+            // 消息已经发出去了，标记失败也不能报错：否则 agent 以为没发出去，会再发一遍
+            let handledNote = reIds.isEmpty || body.from == "user" ? ""
+                : "\n" + ((try? markHandled(p[0], me: body.from, ids: reIds)) ?? "消息已发出，但没能标记已处理，用 \(Config.cli) done 再标一次")
+            return req.isForm ? .text("已发送给 \(names)\(note)\(handledNote)") : .json(result)
+        }
+        if let p = match("GET", "api/groups/:id/inbox") {
+            let me = (req.query["me"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return .text(try inboxText(p[0], me: me, direct: req.query["direct"] == "1", includeHandled: req.query["all"] == "1"))
+        }
+        if let p = match("POST", "api/groups/:id/done") {
+            let form = req.formValues()
+            let me = (form["me"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let ids = try parseMessageIds(form["ids"] ?? "")
+            guard !ids.isEmpty else { throw UserError("要写消息编号，如 \(Config.cli) done -g \(p[0]) --me \(me.isEmpty ? "<我的名字>" : me) 123 124") }
+            return .text(try markHandled(p[0], me: me, ids: ids))
         }
         if let p = match("POST", "api/groups/:id/spawn") {
             let form = req.formValues()
@@ -406,7 +422,7 @@ final class API {
         // 后台成员之间（coder ↔ tester）的消息算任务；群主和用户发的算指示
         let purpose: DeliveryPurpose = sender?.headless == true ? .task : .instruction
         for r in recipients {
-            let text = Prompts.delivered(group: group, sender: sender, recipient: r, content: content, verdict: verdict,
+            let text = Prompts.delivered(group: group, sender: sender, recipient: r, messageId: message.id, content: content, verdict: verdict,
                                          urgent: urgent, sentAt: message.createdAt)
             delivery.enqueue(deliveryId: try repo.addDelivery(messageId: message.id, memberId: r.id, text: text, purpose: purpose),
                              member: r)
@@ -416,6 +432,92 @@ final class API {
 
     /// 打回超过这么多次就暂停，交给群主介入
     private let maxFails = 8
+
+    // ---------- 收件箱：查发给自己、还没处理的消息 ----------
+
+    /// 「我」在这个群里对应的成员记录。集群主群的群主同时在各个子群里，子群里的记录一起算，
+    /// 这样群主在主群查一次就能看到所有子群发给它的消息
+    private func myMemberIds(_ gid: String, me: String) throws -> [Int64] {
+        let group = try requireGroup(gid)
+        guard !me.isEmpty else { throw UserError("要用 --me 写上你在群里的名字") }
+        guard let mine = try repo.listMembers(groupId: gid).first(where: { $0.alias == me }) else {
+            throw UserError("\(me) 不在群聊「\(group.name)」里，可用 \(Config.cli) members -g \(gid) 核对名字")
+        }
+        var ids = [mine.id]
+        if group.cluster {
+            for sub in try repo.listSubgroups(parentId: gid) {
+                if let m = try repo.listMembers(groupId: sub.id).first(where: { $0.alias == me }) { ids.append(m.id) }
+            }
+        }
+        return ids
+    }
+
+    /// "123, #124 125" → [123, 124, 125]。逗号、空格、换行分隔都行，# 可带可不带
+    /// （命令行里 # 后面会被 shell 当注释吃掉，所以提示词里一律教只写数字；这里兼容加了引号的写法）
+    private func parseMessageIds(_ text: String) throws -> [Int64] {
+        let parts = text.split(whereSeparator: { $0 == "," || $0 == "，" || $0.isWhitespace })
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "#")) }
+        return try parts.filter { !$0.isEmpty }.map {
+            guard let id = Int64($0) else { throw UserError("消息编号要是数字：\($0)") }
+            return id
+        }
+    }
+
+    /// 把几条消息标成已处理，返回给命令行看的结果
+    private func markHandled(_ gid: String, me: String, ids: [Int64]) throws -> String {
+        let found = try repo.markHandled(memberIds: try myMemberIds(gid, me: me), messageIds: ids)
+        let missing = ids.filter { !found.contains($0) }
+        var text = found.isEmpty ? "" : "已标为处理完：" + found.map { "#\($0)" }.joined(separator: " ")
+        if !missing.isEmpty {
+            if !text.isEmpty { text += "\n" }
+            // 群主在子群里只能标这个子群的消息，主群和别的子群的要到主群里标
+            text += "这些编号不是发给 \(me) 的消息、或者不在这个群里，没有标记：" + missing.map { "#\($0)" }.joined(separator: " ")
+        }
+        return text
+    }
+
+    /// kkAgent inbox 的输出：发给我的消息。
+    /// 默认只列已经轮到它看（送进会话了，或者投递失败、它根本没收到）却还没处理的；
+    /// 还在排队、正在送的不列，只报个数：它们稍后照常会送进会话，先在这里处理掉会导致送进来后再做一遍
+    private func inboxText(_ gid: String, me: String, direct: Bool, includeHandled: Bool) throws -> String {
+        let group = try requireGroup(gid)
+        var items = try repo.inbox(memberIds: try myMemberIds(gid, me: me), direct: direct, includeHandled: includeHandled)
+        var queuedCount = 0
+        if !includeHandled {
+            let isQueued = { (item: Repository.InboxItem) in item.status == .pending || item.status == .running }
+            queuedCount = items.filter(isQueued).count
+            items.removeAll(where: isQueued)
+        }
+        let scope = direct ? "点名发给 \(me)" : "发给 \(me)"
+        let queuedNote = queuedCount > 0 ? "另有 \(queuedCount) 条还在排队，稍后会送进来，到时照常处理。" : ""
+        guard !items.isEmpty else {
+            return (includeHandled ? "没有\(scope)的消息。" : "没有\(scope)、还没处理的消息。") + queuedNote
+        }
+
+        let statusName: [DeliveryStatus: String] = [.pending: "排队中，还没送到", .running: "正在送", .delivered: "已送达",
+                                                    .unconfirmed: "已写入，没确认收到", .failed: "投递失败，你没收到过"]
+        // 消息可能是前几天的，时间带上日期
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        let time = { (iso: String) in parseISO(iso).map(formatter.string) ?? iso }
+        var lines = [includeHandled ? "最近\(scope) 的 \(items.count) 条消息：" : "\(scope)、还没处理的消息（\(items.count) 条）："]
+        for item in items {
+            let m = item.message
+            var tags = [statusName[item.status] ?? item.status.rawValue]
+            if m.to == "all" { tags.append("群发") }
+            if m.urgent { tags.append("紧急") }
+            if item.handled { tags.append("已处理") }
+            // 群主查的是主群加各个子群，标出是哪个群的，回复时 -g 要写那个群
+            let place = m.groupId == gid ? "" : "群「\(item.groupName)」(\(m.groupId)) "
+            lines.append("")
+            lines.append("#\(m.id) \(place)来自 \(m.from == "user" ? "用户" : m.from) · \(time(m.createdAt)) · \(tags.joined(separator: "，"))")
+            lines.append(m.content)
+        }
+        lines.append("")
+        if !queuedNote.isEmpty { lines.append(queuedNote) }
+        lines.append("处理完：回复时在 send 里加 --re <编号>；不需要回复的执行 \(Config.cli) done -g \(group.id) --me \(me) <编号>（编号只写数字，不带 #）")
+        return lines.joined(separator: "\n")
+    }
 
     /// 校验验收结论：只有集群子群里的 tester 能带，pass / fail 二选一。返回规范化后的值（普通消息为空）
     private func checkVerdict(group: GroupSummary, body: PostMessageRequest) throws -> String {

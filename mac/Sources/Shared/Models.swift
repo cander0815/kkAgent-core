@@ -512,13 +512,15 @@ public struct PostMessageRequest: Codable, Sendable {
     public let content: String
     public let verdict: String?       // 只有子群里的 tester 能带：pass / fail；不带等于普通消息
     public let urgent: Bool?          // 紧急消息：对方空闲后排在普通消息前面送进去；不带等于普通消息
+    public let re: String?            // 这条是在回复哪几条消息（编号，逗号分隔）：发出后把那几条标成已处理；不带就不标
 
-    public init(from: String, to: String, content: String, verdict: String? = nil, urgent: Bool? = nil) {
+    public init(from: String, to: String, content: String, verdict: String? = nil, urgent: Bool? = nil, re: String? = nil) {
         self.from = from
         self.to = to
         self.content = content
         self.verdict = verdict
         self.urgent = urgent
+        self.re = re
     }
 }
 

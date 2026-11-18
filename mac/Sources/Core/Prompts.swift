@@ -29,6 +29,7 @@ enum Prompts {
             给群成员发消息，执行命令：
               \(cli) send -g \(group.id) --from \(member.alias) --to <成员名|all> "消息内容"
             查看群成员：\(cli) members -g \(group.id)
+            查看发给你、还没处理的消息：\(cli) inbox -g \(group.id) --me \(member.alias)（加 --direct 只看点名发给你的，不含群发）
 
             规则：
             1. 只发结论：做了什么、改了哪些文件、怎么验证、需要对方做什么。不要发思考过程、尝试过程、工具输出。
@@ -250,6 +251,13 @@ enum Prompts {
         给用户发消息：\(cli) send -g \(group.id) --from \(owner.alias) --to user "内容"
         用户同意拆解方案之前，不要 spawn。
 
+        查看发给你、还没处理的消息（主群和所有子群合在一起列）：
+          \(cli) inbox -g \(group.id) --me \(owner.alias)          （加 --direct 只看点名发给你的，不含群发；加 --all 连已处理的一起看最近 30 条）
+        每条群消息开头有编号（#123）。处理完要标掉，inbox 才不会再列（命令里编号只写数字，不带 #，# 会被 shell 当成注释）：
+          回复时带上编号：\(cli) send ... --re 123 "结论"（一次回复多条写 --re 123,124）
+          不用回复的：    \(cli) done -g \(group.id) --me \(owner.alias) 123 124
+        上下文被压缩后、被用户打断后、手上一批消息处理完时，跑一次 inbox，确认没有漏掉的消息。
+
         建子群（每个功能执行一次）：
           \(cli) spawn -g \(group.id) --from \(owner.alias) --task <功能名> - <<'EOF'
           <任务书>
@@ -451,7 +459,8 @@ enum Prompts {
 
     /// 把一条群消息包装成发给收件人的文字。verdict 是 tester 的验收结论，加在正文前面方便对方一眼看到。
     /// 紧急消息单独送达时也要看得出来：开头标明紧急、发送人和时间（合并投递时每一条的标题里还会再标一次）
-    static func delivered(group: GroupSummary, sender: Member?, recipient: Member, content: String, verdict: String = "",
+    /// messageId 显示在开头（#123），收件人回复时用 --re 带上它，或者用 done 标掉，kkAgent inbox 就不再列这条
+    static func delivered(group: GroupSummary, sender: Member?, recipient: Member, messageId: Int64, content: String, verdict: String = "",
                           urgent: Bool = false, sentAt: String = "") -> String {
         let from = sender.map(describe) ?? "用户"
         let replyTo = sender?.alias ?? "user"
@@ -460,12 +469,15 @@ enum Prompts {
             : ""
         let head = urgentHead + (verdict == "pass" ? "【验收通过】\n" : verdict == "fail" ? "【验收不通过】\n" : "")
         // 集群子群：不能每条都邀请回复，否则成员之间会来回确认个没完（实测出现过群主和 tester 两分钟来回 12 条）
-        let footer = group.parentId.isEmpty
-            ? "—— 回复请执行：\(cli) send -g \(group.id) --from \(recipient.alias) --to \(replyTo) \"结论\"（只发结论）"
-            : "—— 需要对方做事或回答时才回复：\(cli) send -g \(group.id) --from \(recipient.alias) --to \(replyTo) \"结论\"。"
-                + "只是知会、不需要你做什么时不回复；主动找群主只限验收通过待放行、合并完成或受阻。"
+        let reply = "\(cli) send -g \(group.id) --from \(recipient.alias) --to \(replyTo) --re \(messageId) \"结论\""
+        // 后台成员（子群的 coder / tester）每批消息就是一轮，没人查它们的 inbox，不用教它们标 done，免得多出噪音
+        let done = recipient.headless ? "" : "\n—— 不用回复的：\(cli) done -g \(group.id) --me \(recipient.alias) \(messageId)"
+        let footer = (group.parentId.isEmpty
+            ? "—— 回复请执行：\(reply)（只发结论）"
+            : "—— 需要对方做事或回答时才回复：\(reply)。"
+                + "只是知会、不需要你做什么时不回复；主动找群主只限验收通过待放行、合并完成或受阻。") + done
         return """
-            [kkAgent 群聊「\(group.name)」] 来自 \(from)：
+            [kkAgent 群聊「\(group.name)」#\(messageId)] 来自 \(from)：
             \(head)\(content)
 
             \(footer)

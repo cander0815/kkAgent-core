@@ -2,8 +2,10 @@
 # kkAgent 命令行：给 Agent 用来往群里发消息。
 # 只依赖 sh 和 curl，这样 Codex 桌面端这类 PATH 里没有 node 的环境也能用。
 #
-#   kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--verdict pass|fail] [--urgent] "消息内容"
+#   kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--verdict pass|fail] [--urgent] [--re <消息编号>] "消息内容"
 #   kkAgent members -g <群ID>
+#   kkAgent inbox -g <群ID> --me <我的名字> [--direct] [--all]   （查发给自己、还没处理的消息）
+#   kkAgent done -g <群ID> --me <我的名字> <消息编号...>         （不用回复的消息，处理完标掉）
 #   kkAgent spawn -g <主群ID> --from <群主名字> --task <功能名> "需求说明"   （集群：建子群和后台 coder / tester）
 #   kkAgent dissolve -g <子群ID> --from <群主名字>   （集群：群主解散自己的子群）
 #   kkAgent reopen -g <主群ID> --from <群主名字> --coder <会话ID> [--tester <会话ID>] --task <功能名> "说明"   （集群：找回已解散的子群）
@@ -20,8 +22,10 @@ HOST_HEADER="Host: 127.0.0.1:$PORT"
 usage() {
   cat <<'EOF'
 用法：
-  kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--urgent] "消息内容"
+  kkAgent send -g <群ID> --from <我的名字> --to <成员名|all|user> [--urgent] [--re <消息编号>] "消息内容"
   kkAgent members -g <群ID>
+  kkAgent inbox -g <群ID> --me <我的名字> [--direct] [--all]
+  kkAgent done -g <群ID> --me <我的名字> <消息编号...>
   kkAgent spawn -g <主群ID> --from <群主名字> --task <功能名> "需求说明"
   kkAgent dissolve -g <子群ID> --from <群主名字>
   kkAgent reopen -g <主群ID> --from <群主名字> --coder <原 coder 会话ID> [--tester <原 tester 会话ID>] --task <功能名> "这次要做什么"
@@ -29,6 +33,10 @@ usage() {
 消息内容 / 需求说明写 - 时从标准输入读取。只发结论，不要发思考过程。
 --verdict 只给集群子群里的 tester 用，pass 和 fail 都只发给 coder。
 --urgent 标为紧急：对方空闲后排在普通消息前面送进去。只在对方继续做下去会白干、或者会造成破坏时用。
+--re 写这条在回复哪几条消息（群消息开头 #123 里的数字，多条用逗号隔开），发出后那几条标为已处理。
+消息编号只写数字，不要带 #：shell 会把 # 和后面的内容当成注释吃掉。
+inbox 默认只列送进会话、还没处理的（还在排队的只报条数）；--direct 只看点名发给自己的（不含群发）；--all 连已处理的一起看最近 30 条。
+集群群主在主群里 inbox，子群发给它的也一起列出。系统通知不列。
 EOF
   exit 1
 }
@@ -37,7 +45,7 @@ cmd="$1"
 [ -n "$cmd" ] || usage
 shift
 
-group="" from="" to="" task="" verdict="" urgent="" coder="" tester="" content=""
+group="" from="" to="" task="" verdict="" urgent="" coder="" tester="" content="" re="" me="" direct="" all=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -g|--group) group="$2"; shift 2 ;;
@@ -46,6 +54,10 @@ while [ $# -gt 0 ]; do
     --task)     task="$2";  shift 2 ;;
     --verdict)  verdict="$2"; shift 2 ;;
     --urgent)   urgent=1; shift ;;
+    --re)       re="$2"; shift 2 ;;
+    --me)       me="$2"; shift 2 ;;
+    --direct)   direct=1; shift ;;
+    --all)      all=1; shift ;;
     --coder)    coder="$2"; shift 2 ;;
     --tester)   tester="$2"; shift 2 ;;
     -h|--help)  usage ;;
@@ -65,11 +77,31 @@ case "$cmd" in
       --data-urlencode "to=$to" \
       --data-urlencode "verdict=$verdict" \
       --data-urlencode "urgent=$urgent" \
+      --data-urlencode "re=$re" \
       --data-urlencode "content=$content" \
       "$BASE/api/groups/$group/messages"
     ;;
   members)
     curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" "$BASE/api/groups/$group/members?format=text"
+    ;;
+  inbox)
+    [ -n "$me" ] || usage
+    # -G：把 --data-urlencode 的参数拼到网址后面，发 GET 请求（名字可能是中文，要编码）
+    # format=text：出错时也回纯文字（和 members 一样）
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" -G \
+      --data-urlencode "format=text" \
+      --data-urlencode "me=$me" \
+      --data-urlencode "direct=$direct" \
+      --data-urlencode "all=$all" \
+      "$BASE/api/groups/$group/inbox"
+    ;;
+  done)
+    # 消息编号是没有选项名的参数，被上面的循环拼进了 content
+    [ -n "$me" ] && [ -n "$content" ] || usage
+    curl -s --noproxy '*' --fail-with-body -H "$HOST_HEADER" \
+      --data-urlencode "me=$me" \
+      --data-urlencode "ids=$content" \
+      "$BASE/api/groups/$group/done"
     ;;
   spawn)
     [ -n "$from" ] && [ -n "$task" ] && [ -n "$content" ] || usage
