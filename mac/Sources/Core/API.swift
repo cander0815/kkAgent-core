@@ -25,6 +25,8 @@
 // DELETE /api/solo/:id                     销毁单独会话（关 tmux；绑着它的群成员一起移出）
 // POST   /api/solo/:id/hook                单独会话的状态 hook 专用（?launch= 启动令牌）
 // GET    /api/vms                          正在运行的虚拟机名字
+// GET    /api/model-settings               设置 → 模型：当前的默认模型 / 思考强度，以及两个 CLI 支持的模型
+// POST   /api/model-settings               保存默认模型 / 思考强度 {claudeModel, claudeEffort, codexModel, codexEffort}
 // GET    /api/sessions                     历史会话列表（?agent=claude|codex&vm=机器名，vm 不带表示物理机）
 // GET    /api/sessions/:id/transcript      会话全部内容（?agent=&vm=&offset=，从头读，offset 增量读取）
 import Foundation
@@ -256,6 +258,14 @@ final class API {
         }
         if match("GET", "api/vms") != nil {
             return .json(VM.running())
+        }
+        if match("GET", "api/model-settings") != nil {
+            return .json(ModelSettingsInfo(settings: ModelSettingsStore.load(),
+                                           claudeModels: ModelCatalog.claude(), codexModels: ModelCatalog.codex()))
+        }
+        if match("POST", "api/model-settings") != nil {
+            try ModelSettingsStore.save(try decode(ModelSettings.self, req))
+            return .json(OkResult())
         }
         if match("GET", "api/sessions") != nil {
             let agent = try agentParam(req)

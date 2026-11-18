@@ -33,6 +33,8 @@ struct KKAgentApp: App {
             TabView {
                 CoreSettingsView().environmentObject(model)
                     .tabItem { Label("核心", systemImage: "cpu") }
+                ModelSettingsView().environmentObject(model)
+                    .tabItem { Label("模型", systemImage: "sparkles") }
                 TerminalSettingsView()
                     .tabItem { Label("终端", systemImage: "terminal") }
                 DisplaySettingsView()

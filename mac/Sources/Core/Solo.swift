@@ -212,7 +212,7 @@ extension DeliveryQueue {
     private func runSoloCodexOpening(id: Int64, cwd: String) throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Config.codexBin)
-        p.arguments = ["exec", "--json"] + Config.codexExecApproval + ["-C", cwd, "-"]
+        p.arguments = ["exec", "--json"] + Config.codexExecApproval + ModelSettingsStore.codexArgs() + ["-C", cwd, "-"]
         p.environment = ShellEnv.environment
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         let input = Pipe(), output = Pipe()

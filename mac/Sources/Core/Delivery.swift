@@ -426,7 +426,7 @@ final class DeliveryQueue {
                 let claude = try VM.claudeLaunch(vm: member.vm, cwd: member.cwd, args: [
                     "-p", isNew ? "--session-id" : "--resume", member.sessionId, "--output-format", "stream-json", "--verbose",
                     "--permission-mode", Config.claudePermissionMode,
-                ])
+                ] + ModelSettingsStore.claudeArgs()) // 设置 → 模型 里配的默认模型和思考强度
                 try run(claude.executable, claude.args, cwd: claude.cwd, stdin: text, memberId: member.headless ? member.id : nil)
             }
         }
@@ -476,7 +476,8 @@ final class DeliveryQueue {
         case .claude:
             let isNew = Transcript.find(agent: .claude, sessionId: sessionId, vm: vm) == nil
             let hookArgs = try AgentStatusStore.shared.prepareLaunch(owner: owner, sessionId: sessionId, vm: vm, label: label, repo: repo)
-            let claude = ["claude", isNew ? "--session-id" : "--resume", sessionId, "--permission-mode", Config.claudePermissionMode] + hookArgs
+            let claude = ["claude", isNew ? "--session-id" : "--resume", sessionId, "--permission-mode", Config.claudePermissionMode]
+                + ModelSettingsStore.claudeArgs() + hookArgs // 设置 → 模型 里配的默认模型和思考强度
             let command: String
             if vm.isEmpty {
                 command = claude.map(q).joined(separator: " ")
@@ -491,7 +492,8 @@ final class DeliveryQueue {
             return (command, "❯")
         case .codex:
             guard !sessionId.isEmpty else { throw CoreError(message: "\(label) 的 Codex 会话还没建好，没法在 tmux 里打开") }
-            let command = ([Config.codexBin] + Config.codexInteractiveApproval + ["-C", cwd, "resume", sessionId]).map(q).joined(separator: " ")
+            let command = ([Config.codexBin] + Config.codexInteractiveApproval + ModelSettingsStore.codexArgs()
+                + ["-C", cwd, "resume", sessionId]).map(q).joined(separator: " ")
             return (command, "for shortcuts")
         }
     }
@@ -646,7 +648,7 @@ final class DeliveryQueue {
     /// 成功 = 退出码 0 + 收到 turn.completed + 没有 turn.failed
     private func runCodexTurn(member: Member, text: String, bootstrap: Bool) throws {
         // 审批交给 Codex 的自动审查（见 Config.codexExecApproval），只能在工作目录（worktree）里写；提示词写 - 表示从 stdin 读
-        var args = ["exec", "--json"] + Config.codexExecApproval + ["-C", member.cwd]
+        var args = ["exec", "--json"] + Config.codexExecApproval + ModelSettingsStore.codexArgs() + ["-C", member.cwd]
         if !member.sessionId.isEmpty {
             args += ["resume", member.sessionId]
         } else if !bootstrap {

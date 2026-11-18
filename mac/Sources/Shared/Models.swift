@@ -541,3 +541,43 @@ public struct OkResult: Codable, Sendable {
     public let ok: Bool
     public init() { ok = true }
 }
+
+// ---------- 设置 → 模型 ----------
+
+/// 启动 / 续接 Claude、Codex 会话时默认带上的模型和思考强度。空字符串 = 跟随 CLI 自己的默认（不传这个参数）
+public struct ModelSettings: Codable, Equatable, Sendable {
+    public var claudeModel = ""
+    public var claudeEffort = "medium"
+    public var codexModel = ""
+    public var codexEffort = "medium"
+
+    public init() {}
+}
+
+/// CLI 支持的一个模型（从 CLI 的模型目录里读出来的）
+public struct ModelOption: Codable, Hashable, Sendable {
+    public let id: String          // 传给 --model / -m 的值
+    public let name: String        // 显示名，如 Opus 5.5
+    public let efforts: [String]   // 支持的思考强度，如 low、medium；空 = 这个模型不支持设置思考强度
+    public let main: Bool          // false = 旧版或不常用的，下拉框里排在后面
+
+    public init(id: String, name: String, efforts: [String], main: Bool) {
+        self.id = id
+        self.name = name
+        self.efforts = efforts
+        self.main = main
+    }
+}
+
+/// GET /api/model-settings：当前设置 + 两个 CLI 现在支持的模型
+public struct ModelSettingsInfo: Codable, Sendable {
+    public let settings: ModelSettings
+    public let claudeModels: [ModelOption]
+    public let codexModels: [ModelOption]
+
+    public init(settings: ModelSettings, claudeModels: [ModelOption], codexModels: [ModelOption]) {
+        self.settings = settings
+        self.claudeModels = claudeModels
+        self.codexModels = codexModels
+    }
+}
