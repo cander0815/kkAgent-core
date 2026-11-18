@@ -22,7 +22,7 @@ final class AppModel: ObservableObject {
     private var transcriptOffset: Int?
     private var transcriptSource: String? // 上次读的是哪个会话文件（offset 只在同一个文件里有意义）
     private var started = false
-    /// 有成员卡在授权框上时发系统通知（见 AttentionNotifier.swift）
+    /// 有成员卡在授权框上时弹通知横幅（见 AttentionNotifier.swift）
     private let notifier = AttentionNotifier()
     /// 打开主窗口（窗口关掉后，点通知要能把它重新打开）。由 RootView 出现时设置
     var openMainWindow: (() -> Void)?
@@ -65,7 +65,6 @@ final class AppModel: ObservableObject {
         started = true
         notifier.onOpen = { [weak self] groupId, memberId in self?.focus(groupId: groupId, memberId: memberId) }
         notifier.onOpenSolo = { [weak self] soloId in self?.focusSolo(soloId) }
-        notifier.start()
         Task {
             while true {
                 await refresh()
@@ -85,12 +84,12 @@ final class AppModel: ObservableObject {
                 selectGroup(sortedGroups.first?.id)
             }
             if let gid = selectedGroupId { detail = try await api.get("/api/groups/\(gid)") }
-            // 单独会话：这一轮结束、出错、启动失败发系统通知（不管现在在哪一页）。查不到就这次不处理，不影响别的刷新
+            // 单独会话：这一轮结束、出错、启动失败弹通知横幅（不管现在在哪一页）。查不到就这次不处理，不影响别的刷新
             if let solos: [SoloSession] = try? await api.get("/api/solo") {
                 notifier.updateSolos(solos)
                 openSoloCount = solos.filter { $0.state == "running" || $0.state == "starting" }.count
             }
-            // 卡在授权框上的群成员和单独会话：新出现的发系统通知（查不到不影响别的刷新）
+            // 卡在授权框上的群成员和单独会话：新出现的弹通知横幅（查不到不影响别的刷新）
             if let attention: [AttentionItem] = try? await api.get("/api/attention") { notifier.update(attention) }
             await refreshTranscript()
         } catch ClientError.offline {

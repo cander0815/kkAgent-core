@@ -37,6 +37,8 @@ struct KKAgentApp: App {
                     .tabItem { Label("模型", systemImage: "sparkles") }
                 TerminalSettingsView()
                     .tabItem { Label("终端", systemImage: "terminal") }
+                NotificationSettingsView()
+                    .tabItem { Label("通知", systemImage: "bell") }
                 DisplaySettingsView()
                     .tabItem { Label("显示", systemImage: "textformat.size") }
             }
