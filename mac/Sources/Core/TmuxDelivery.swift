@@ -392,13 +392,14 @@ enum Composer {
         let lines = styledScreen.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         switch agent {
         case .claude:
-            // Claude 的输入框在最后两条横线之间，第一行以 ❯ 开头
-            let rules = lines.indices.filter { isRule(stripStyle(lines[$0])) }
-            guard rules.count >= 2 else { return nil }
-            let top = rules[rules.count - 2], bottom = rules[rules.count - 1]
-            let box = Array(lines[(top + 1)..<bottom])
-            guard let first = box.first, stripStyle(first).hasPrefix("❯") else { return nil }
-            return box
+            // Claude 的输入框在两条横线之间，第一行以 ❯ 开头（在第 0 列；输入框的续行都有缩进）。
+            // 下沿：最后一条整行都是横线的线。上沿：从下沿往上找「下一行以 ❯ 开头」的横线（可能嵌着会话名，见 isRule）。
+            // 不直接取「倒数第二条横线」：输入框里贴进去的内容也可能有「──── 标题 ────」这种行，会被当成上沿
+            guard let bottom = lines.indices.last(where: { isPlainRule(stripStyle(lines[$0])) }),
+                  let top = lines.indices[..<bottom].last(where: { index in
+                      index + 1 < bottom && isRule(stripStyle(lines[index])) && stripStyle(lines[index + 1]).hasPrefix("❯")
+                  }) else { return nil }
+            return Array(lines[(top + 1)..<bottom])
         case .codex:
             // Codex 的输入框以 › 开头；屏幕最下面是状态栏（模型名、目录等），和输入框之间隔一个空行。
             // 输入框里的段落之间也可能有空行，所以取到「最后一个空行」之前为止
@@ -441,9 +442,18 @@ enum Composer {
         text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.map(String.init).joined()
     }
 
-    private static func isRule(_ line: String) -> Bool {
+    /// 输入框下沿：整行都是横线
+    private static func isPlainRule(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         return trimmed.count >= 20 && trimmed.allSatisfy { $0 == "─" }
+    }
+
+    /// 输入框上沿。会话用 /rename 起过名字时，这条横线中间会嵌着名字（实测：「──────… <会话名> ─」），
+    /// 所以不要求整行都是横线：以一长串横线开头、以横线结尾、横线总数够多就算。表格边框以 ┌ ├ └ 开头，不会被当成横线
+    private static func isRule(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix(String(repeating: "─", count: 10)) && trimmed.hasSuffix("─")
+            && trimmed.filter { $0 == "─" }.count >= 20
     }
 
     /// 把输入框的几行拼起来：去掉开头的提示符和每行的缩进
