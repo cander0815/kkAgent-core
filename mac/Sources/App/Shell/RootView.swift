@@ -54,7 +54,13 @@ struct RootView: View {
             Text(model.errorMessage ?? "")
         }
         // 点授权通知时：窗口关着要能重新打开它；不在群聊页的话切回群聊页
-        .onAppear { model.openMainWindow = { openWindow(id: "main") } }
+        .onAppear {
+            model.openMainWindow = { openWindow(id: "main") }
+            model.onSolos = { [soloSessions] in soloSessions.apply($0) } // 「会话」页的列表由主刷新统一拉
+            model.activeModule = module.value
+        }
+        // 告诉 AppModel 现在在哪一页：群聊页的数据只在这一页拉
+        .onChange(of: module.value) { _, value in model.activeModule = value }
         .onChange(of: model.focusRequests) { _, _ in module.value = .groupChat }
         // 点单独会话的通知时：切到「会话」页选中它
         .onChange(of: model.soloFocusRequests) { _, _ in
@@ -162,10 +168,44 @@ struct ModuleRail: View {
             .buttonStyle(.plain)
             .clickable()
             .help(model.coreOnline ? "核心运行中，点开查看和控制" : "核心没有运行，点开启动")
+            // ubx 虚拟机的负载（10 秒更新一次）。一般只有一台；有多台时每台一组
+            ForEach(model.vmLoads, id: \.name) { load in
+                VMLoadBadge(load: load, showName: model.vmLoads.count > 1)
+            }
         }
         .padding(.vertical, 10)
         .frame(width: 64)
         .background(Color(nsColor: .underPageBackgroundColor).opacity(0.5))
+    }
+}
+
+/// 功能栏最下面一台 ubx 虚拟机的负载：CPU（平均负载 ÷ 核数）和内存占用。
+/// 70% 以上变橙，100% 以上变红（CPU 超过 100% 表示有任务在排队），平时灰色不抢眼
+struct VMLoadBadge: View {
+    let load: VMLoad
+    let showName: Bool // 多台虚拟机时才写名字，一台时不占地方
+
+    private func color(_ percent: Int) -> Color {
+        if percent >= 100 { return .red }
+        if percent >= 70 { return .orange }
+        return .secondary
+    }
+
+    var body: some View {
+        VStack(spacing: 1) {
+            if showName {
+                Text(load.name).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
+            }
+            Text("CPU \(load.cpuPercent)%").foregroundStyle(color(load.cpuPercent))
+            Text("内存 \(load.memPercent)%").foregroundStyle(color(load.memPercent))
+        }
+        .font(.system(size: 9).monospacedDigit())
+        .frame(width: 52)
+        .help("""
+        虚拟机 \(load.name)（每 10 秒更新）
+        CPU：最近 1 分钟平均负载 \(String(format: "%.2f", load.load1)) / \(load.cores) 核
+        内存：已用 \(load.memUsedMB) MB / 共 \(load.memTotalMB) MB
+        """)
     }
 }
 

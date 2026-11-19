@@ -17,6 +17,19 @@ enum VM {
         runUbx(["run", vm] + command)
     }
 
+    /// 一台虚拟机现在的负载：进去跑一次 shell，读核数、/proc/loadavg 和 /proc/meminfo。读不到返回 nil
+    static func load(_ vm: String) -> VMLoad? {
+        // 输出三行：核数；平均负载（1/5/15 分钟…）；「总内存KB 可用内存KB」
+        let script = "nproc; cat /proc/loadavg; awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}' /proc/meminfo"
+        guard let data = output(vm, ["sh", "-c", script]),
+              let lines = String(data: data, encoding: .utf8)?.split(separator: "\n"), lines.count >= 3,
+              let cores = Int(lines[0].trimmingCharacters(in: .whitespaces)),
+              let load1 = lines[1].split(separator: " ").first.flatMap({ Double($0) }) else { return nil }
+        let mem = lines[2].split(separator: " ").compactMap { Int($0) }
+        guard mem.count == 2 else { return nil }
+        return VMLoad(name: vm, cores: cores, load1: load1, memTotalMB: mem[0] / 1024, memUsedMB: (mem[0] - mem[1]) / 1024)
+    }
+
     /// 启动 claude 要用的程序、参数和工作目录。
     /// 物理机：直接跑 claude。虚拟机：经 ubx run 进去跑，工作目录用 --cd 传给虚拟机。
     static func claudeLaunch(vm: String, cwd: String, args: [String]) throws -> (executable: String, args: [String], cwd: String) {

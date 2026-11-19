@@ -306,7 +306,7 @@ public struct Delivery: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
-public struct GroupDetail: Codable, Sendable {
+public struct GroupDetail: Codable, Equatable, Sendable {
     public let group: GroupSummary
     public let members: [MemberDetail]
     public let messages: [Message]
@@ -415,8 +415,29 @@ public struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// 一台虚拟机现在的负载（GET /api/vm-load），功能栏「核心」下面显示，App 每 10 秒查一次
+public struct VMLoad: Codable, Hashable, Sendable {
+    public let name: String
+    public let cores: Int        // CPU 核数
+    public let load1: Double     // 最近 1 分钟的平均负载（/proc/loadavg 第一个数）
+    public let memTotalMB: Int
+    public let memUsedMB: Int    // 总内存 - 可用内存（MemAvailable），缓存不算占用
+
+    /// CPU 忙的程度：平均负载 ÷ 核数，100% 表示所有核都排满了，超过 100% 说明有任务在排队
+    public var cpuPercent: Int { cores > 0 ? Int((load1 / Double(cores) * 100).rounded()) : 0 }
+    public var memPercent: Int { memTotalMB > 0 ? memUsedMB * 100 / memTotalMB : 0 }
+
+    public init(name: String, cores: Int, load1: Double, memTotalMB: Int, memUsedMB: Int) {
+        self.name = name
+        self.cores = cores
+        self.load1 = load1
+        self.memTotalMB = memTotalMB
+        self.memUsedMB = memUsedMB
+    }
+}
+
 /// 核心的运行信息，界面用来判断核心在不在
-public struct CoreHealth: Codable, Sendable {
+public struct CoreHealth: Codable, Equatable, Sendable {
     public let pid: Int32
     public let startedAt: String
     public let port: Int

@@ -4,7 +4,7 @@
 import AppKit
 import SwiftUI
 
-/// 「会话」页的数据：每 2 秒从核心刷新一次列表
+/// 「会话」页的数据：列表由 AppModel 每 2 秒拉一次交过来（见 apply）
 @MainActor
 final class SoloModel: ObservableObject {
     @Published private(set) var sessions: [SoloSession] = []
@@ -66,9 +66,15 @@ final class SoloModel: ObservableObject {
         namesRevision += 1
     }
 
+    /// 新建、销毁之后马上拉一次（平时的 2 秒刷新由 AppModel 统一拉，再交给 apply）
     func refresh() async {
         guard let list: [SoloSession] = try? await api.get("/api/solo") else { return }
-        sessions = list
+        apply(list)
+    }
+
+    /// 用最新的列表更新页面。内容没变就不重新赋值，免得整页重画
+    func apply(_ list: [SoloSession]) {
+        if list != sessions { sessions = list }
         // 选中的已经结束了（销毁或 exit）：选中第一个
         if selected == nil { selectedId = list.first?.id }
         markShownAsViewed()
@@ -124,13 +130,8 @@ struct SoloModule: View {
             Divider()
             detail.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // 页面在的时候每 2 秒刷新一次（会话 exit 后自动从列表消失）
-        .task {
-            while !Task.isCancelled {
-                await model.refresh()
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
+        // 列表平时由 AppModel 每 2 秒拉一次交过来（会话 exit 后自动从列表消失）；打开页面时先补一次，不显示旧列表
+        .task { await model.refresh() }
         // 换了选中的会话：等新终端显示出来再判断看过没有（不用等下一次刷新）
         .onChange(of: model.selectedId) { _, _ in
             Task {

@@ -30,6 +30,61 @@ enum Transcript {
         }
     }
 
+    // ---------- 界面显示用的缓存 ----------
+    // 界面每 2 秒刷新群详情和执行过程，每次都给成员找会话文件：Codex 要遍历整个 ~/.codex/sessions（几百个文件），
+    // 虚拟机里的要起 ubx 进程，是核心除 tmux 以外最大的开销。这两处只是显示，晚一点知道没关系，所以用下面带缓存的版本。
+    // 投递、打断这些要据此动手的地方仍然用上面的 find，每次现场找。
+
+    private static let displayLock = NSLock()
+    private static var foundFiles: [String: (path: String?, at: Date)] = [:] // "agent|vm|会话ID" → 找到的文件、什么时候找的
+    private static var vmLive: [String: (lines: [String], at: Date)] = [:]   // 虚拟机名 → 活着的登记文件、什么时候读的
+
+    /// 和 find 一样，但记住结果：
+    /// - 本机找到的：每次只确认文件还在。Claude 的文件不会搬家；Codex 会分段写到新文件，所以 30 秒重新找一次
+    /// - 虚拟机里找到的：确认不了文件还在不在，60 秒重新找一次
+    /// - 没找到的：5 秒内不再找（刚启动的会话过几秒才写出文件，不能等太久）
+    static func findForDisplay(agent: AgentKind, sessionId: String, vm: String = "") -> String? {
+        let key = "\(agent.rawValue)|\(vm)|\(sessionId)"
+        displayLock.lock()
+        let known = foundFiles[key]
+        displayLock.unlock()
+        if let known {
+            let age = Date().timeIntervalSince(known.at)
+            if let path = known.path {
+                let maxAge: TimeInterval = !vm.isEmpty ? 60 : (agent == .codex ? 30 : .infinity)
+                if age < maxAge && (!vm.isEmpty || fm.fileExists(atPath: path)) { return path }
+            } else if age < 5 {
+                return nil
+            }
+        }
+        let path = agent == .codex && vm.isEmpty
+            ? findCodexFromListing(sessionId: sessionId)
+            : find(agent: agent, sessionId: sessionId, vm: vm)
+        displayLock.lock()
+        foundFiles[key] = (path, Date())
+        displayLock.unlock()
+        return path
+    }
+
+    /// 和 claudeLiveStatus 一样，但虚拟机里的登记 3 秒内只读一次：同一台虚拟机的成员共用一份，不再每人起一个 ubx。
+    /// 本机的读两三个小文件，本来就便宜，直接现场读
+    static func claudeLiveStatusForDisplay(sessionId: String, vm: String = "") -> ClaudeLive {
+        guard !vm.isEmpty else { return claudeLiveStatus(sessionId: sessionId) }
+        displayLock.lock()
+        let known = vmLive[vm]
+        displayLock.unlock()
+        let lines: [String]
+        if let known, Date().timeIntervalSince(known.at) < 3 {
+            lines = known.lines
+        } else {
+            lines = vmLiveLines(vm)
+            displayLock.lock()
+            vmLive[vm] = (lines, Date())
+            displayLock.unlock()
+        }
+        return pickLive(lines, sessionId: sessionId)
+    }
+
     /// Claude 会话最近一次是在哪种系统上运行的：物理机 "darwin"，虚拟机 "linux"，找不到返回空。
     /// 虚拟机的 ~/.claude/projects 是指向物理机的软链接（ExitBox 在 2026-11-16 改的），两边的会话文件放在同一个目录里，
     /// 「文件在哪台机器上找得到」已经分不出会话属于谁，只能看会话自己的记录：
@@ -139,12 +194,39 @@ enum Transcript {
         guard !sessionId.isEmpty else { return [] }
         let root = "\(Config.home)/.codex/sessions"
         guard let walker = fm.enumerator(atPath: root) else { return [] }
-        var files: [(path: String, modified: Date)] = []
+        var matched: [String] = []
         for case let path as String in walker where path.hasSuffix(".jsonl") && path.contains(sessionId) {
-            let full = "\(root)/\(path)"
-            files.append((full, (try? fm.attributesOfItem(atPath: full)[.modificationDate] as? Date) ?? .distantPast))
+            matched.append("\(root)/\(path)")
         }
-        return files.sorted { $0.modified < $1.modified }.map(\.path)
+        return sortedByModified(matched)
+    }
+
+    /// 按最后修改时间从早到晚排
+    private static func sortedByModified(_ paths: [String]) -> [String] {
+        paths.map { ($0, (try? fm.attributesOfItem(atPath: $0)[.modificationDate] as? Date) ?? .distantPast) }
+            .sorted { $0.1 < $1.1 }.map(\.0)
+    }
+
+    /// ~/.codex/sessions 下所有会话文件的清单、什么时候列的
+    private static var codexListing: (paths: [String], at: Date)?
+
+    /// 和 find(agent: .codex) 一样，但用 10 秒内列过的目录清单，不每个会话各遍历一遍。
+    /// 14 个 Codex 会话各自 30 秒重新找一次文件时，原来平均 2 秒就要遍历一次整个目录（几百个文件），还拿着锁挡住投递。
+    /// 10 秒内新写出的分段可能还不在清单里，所以只给显示、定时跟踪用；要据此决定能不能写入时用 find 现场找
+    static func findCodexFromListing(sessionId: String) -> String? {
+        guard !sessionId.isEmpty else { return nil }
+        displayLock.lock()
+        if codexListing == nil || Date().timeIntervalSince(codexListing!.at) >= 10 {
+            let root = "\(Config.home)/.codex/sessions"
+            var paths: [String] = []
+            if let walker = fm.enumerator(atPath: root) {
+                for case let path as String in walker where path.hasSuffix(".jsonl") { paths.append("\(root)/\(path)") }
+            }
+            codexListing = (paths, Date())
+        }
+        let matched = codexListing!.paths.filter { $0.contains(sessionId) }
+        displayLock.unlock()
+        return sortedByModified(matched).last // 最后修改的是正在写的那一段（见 codexSessionFiles）
     }
 
     /// 从会话文件里读出工作目录
@@ -581,6 +663,11 @@ enum Transcript {
 
     /// 虚拟机里的同一件事：进程在不在只有虚拟机自己知道，所以让它把「进程还活着」的登记文件一行一个打出来，这边再挑
     private static func vmClaudeLiveStatus(sessionId: String, vm: String) -> ClaudeLive {
+        pickLive(vmLiveLines(vm), sessionId: sessionId)
+    }
+
+    /// 虚拟机里进程还活着的登记文件内容，一行一个
+    private static func vmLiveLines(_ vm: String) -> [String] {
         // 登记文件名就是进程号（<pid>.json）；结尾的 true 保证最后一个进程不在时命令也算成功
         let script = """
             for f in "$HOME"/.claude/sessions/*.json; do
@@ -590,8 +677,13 @@ enum Transcript {
             true
             """
         let text = VM.output(vm, ["sh", "-c", script]).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        for line in text.split(separator: "\n") {
-            guard let info = parseJSON(String(line)), info["sessionId"] as? String == sessionId else { continue }
+        return text.split(separator: "\n").map(String.init)
+    }
+
+    /// 从登记文件内容里挑出这个会话的
+    private static func pickLive(_ lines: [String], sessionId: String) -> ClaudeLive {
+        for line in lines {
+            guard let info = parseJSON(line), info["sessionId"] as? String == sessionId else { continue }
             return ClaudeLive(live: true, status: info["status"] as? String ?? "", name: info["name"] as? String ?? "")
         }
         return ClaudeLive()

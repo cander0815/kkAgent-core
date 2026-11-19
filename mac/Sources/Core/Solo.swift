@@ -125,7 +125,7 @@ extension DeliveryQueue {
             guard open.state != "failed" else { throw UserError("这个会话在「会话」页里有一条启动失败的记录，先把它销毁再继续") }
             // 运行中但 tmux 已经没了（用户刚 exit，定时检查还没收尾）：先收尾，再往下接着这个会话新开一条。
             // 正在启动的 tmux 本来就可能还没起来，照样复用
-            if open.state == "running" && !Tmux.exists(open.tmux) {
+            if open.state == "running" && !Tmux.exists(open.tmux, fresh: true) {
                 endSolo(open, reason: "在终端里退出了")
             } else {
                 return open
@@ -177,7 +177,7 @@ extension DeliveryQueue {
                 return
             }
             guard Tmux.waitReady(solo.tmux, readyMarker: readyMarker, timeout: Config.tmuxReadyTimeout) else {
-                throw CoreError(message: Tmux.exists(solo.tmux) ? "界面 \(Int(Config.tmuxReadyTimeout / 60)) 分钟内没就绪" : "界面就绪前就退出了（可能是进虚拟机或启动失败）")
+                throw CoreError(message: Tmux.exists(solo.tmux, fresh: true) ? "界面 \(Int(Config.tmuxReadyTimeout / 60)) 分钟内没就绪" : "界面就绪前就退出了（可能是进虚拟机或启动失败）")
             }
             if solo.agent == .claude { markReadyIfIdle(owner: .solo(id), tmux: solo.tmux) }
             // 等界面就绪期间核心开始退出了：同样关掉，状态留在 starting
@@ -245,7 +245,7 @@ extension DeliveryQueue {
         for solo in (try? repo.liveSolos()) ?? [] where solo.state == "running" { SoloTurnWatch.start(solo.id) }
         for solo in (try? repo.liveSolos()) ?? [] where solo.state == "starting" {
             var ready = false
-            if Tmux.exists(solo.tmux) {
+            if Tmux.exists(solo.tmux, fresh: true) {
                 let styled = Tmux.styledScreen(solo.tmux)
                 switch solo.agent {
                 case .claude: ready = MemberReadiness.claudeScreen(styled, turnEnded: true) != .unknown

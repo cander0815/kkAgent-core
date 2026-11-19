@@ -27,6 +27,7 @@
 // DELETE /api/solo/:id                     销毁单独会话（关 tmux；绑着它的群成员一起移出）
 // POST   /api/solo/:id/hook                单独会话的状态 hook 专用（?launch= 启动令牌）
 // GET    /api/vms                          正在运行的虚拟机名字
+// GET    /api/vm-load                      正在运行的虚拟机的负载（CPU 平均负载、内存），功能栏「核心」下面显示
 // GET    /api/model-settings               设置 → 模型：当前的默认模型 / 思考强度，以及两个 CLI 支持的模型
 // POST   /api/model-settings               保存默认模型 / 思考强度 {claudeModel, claudeEffort, codexModel, codexEffort}
 // GET    /api/sessions                     历史会话列表（?agent=claude|codex&vm=机器名，vm 不带表示物理机）
@@ -46,6 +47,10 @@ final class API {
     private let reservedAliases: Set<String> = ["all", "user", "system"]
 
     private let cluster: Cluster
+
+    /// 看屏幕判断出的忙闲：成员 id → 结果、什么时候看的。见 activity(of:) 里 hook 状态未知的情况
+    private var screenGuesses: [Int64: (status: String, at: Date)] = [:]
+    private let screenGuessLock = NSLock() // 界面的请求可能同时进来
 
     init(repo: Repository, delivery: DeliveryQueue) {
         self.repo = repo
@@ -126,7 +131,8 @@ final class API {
         }
         if let p = match("GET", "api/members/:id/transcript") {
             guard let member = try repo.getMember(Int64(p[0]) ?? -1) else { throw UserError("成员不存在") }
-            guard let file = Transcript.find(agent: member.agent, sessionId: member.sessionId, vm: member.vm) else { throw UserError("找不到会话文件") }
+            // 界面每 2 秒来读一次，用带缓存的找法（见 Transcript.findForDisplay）
+            guard let file = Transcript.findForDisplay(agent: member.agent, sessionId: member.sessionId, vm: member.vm) else { throw UserError("找不到会话文件") }
             // 第一次打开只读最后 512KB，避免大会话一次读太多。
             // 界面带回来的 source 不是现在这个文件（桌面端 Codex 切到了新的一段）：旧文件的 offset 对新文件没意义，从新文件的起点读
             let sameFile = req.query["source"].map { $0.isEmpty || $0 == file } ?? true
@@ -294,6 +300,9 @@ final class API {
         if match("GET", "api/vms") != nil {
             return .json(VM.running())
         }
+        if match("GET", "api/vm-load") != nil {
+            return .json(VM.running().compactMap { VM.load($0) })
+        }
         if match("GET", "api/model-settings") != nil {
             return .json(ModelSettingsInfo(settings: ModelSettingsStore.load(),
                                            claudeModels: ModelCatalog.claude(), codexModels: ModelCatalog.codex()))
@@ -355,8 +364,9 @@ final class API {
 
     /// 成员当前状态：只给事实，文案由界面决定
     private func state(of m: Member) -> MemberState {
-        let file = Transcript.find(agent: m.agent, sessionId: m.sessionId, vm: m.vm)
-        let live = m.agent == .claude ? Transcript.claudeLiveStatus(sessionId: m.sessionId, vm: m.vm) : .init()
+        // 群详情每 2 秒给每个成员算一次，只是显示，用带缓存的版本（见 Transcript.findForDisplay）
+        let file = Transcript.findForDisplay(agent: m.agent, sessionId: m.sessionId, vm: m.vm)
+        let live = m.agent == .claude ? Transcript.claudeLiveStatusForDisplay(sessionId: m.sessionId, vm: m.vm) : .init()
         // 只有 tmux 里的 Claude 装了状态 hook
         let agentStatus = m.agent == .claude && !m.tmux.isEmpty ? AgentStatusStore.shared.cachedState(of: m).rawValue : ""
         // kkAgent 托管的会话还没写出会话文件：看它的第一条投递（入群说明 / bootstrap）走到哪了，界面显示「正在启动 / 启动失败」
@@ -401,11 +411,7 @@ final class API {
                 // 核心重启后、对方一直没动过，hook 状态就一直未知：看屏幕。有干活动画、确认框就是忙；
                 // 输入框空着、没有动画就当空闲（只用来显示；投递前的判断还要核对会话记录，见 TmuxDelivery.writeBlocker）
                 if delivery.isDelivering(m.id) { return "working" }
-                switch MemberReadiness.claudeScreen(Tmux.styledScreen(m.tmux), turnEnded: true) {
-                case .busy: return "working"
-                case .idle: return "idle"
-                default: return "unknown"
-                }
+                return screenGuess(m)
             }
         }
         // Codex：看会话记录里有没有正在跑的一轮（界面显示用，可以用文件缓存）
@@ -415,6 +421,26 @@ final class API {
         case false: return "idle"
         default: return "unknown"
         }
+    }
+
+    /// 看屏幕猜 Claude 忙不忙，结果记 10 秒。
+    /// 核心重启后，一直没动过的成员 hook 状态会一直未知（空闲的可能几个小时都不动），
+    /// 不记的话群聊页开着时每 2 秒要给每个这样的成员截一次屏。只是显示用，晚几秒没关系
+    private func screenGuess(_ m: Member) -> String {
+        screenGuessLock.lock()
+        let known = screenGuesses[m.id]
+        screenGuessLock.unlock()
+        if let known, Date().timeIntervalSince(known.at) < 10 { return known.status }
+        let status: String
+        switch MemberReadiness.claudeScreen(Tmux.styledScreen(m.tmux), turnEnded: true) {
+        case .busy: status = "working"
+        case .idle: status = "idle"
+        default: status = "unknown"
+        }
+        screenGuessLock.lock()
+        screenGuesses[m.id] = (status, Date())
+        screenGuessLock.unlock()
+        return status
     }
 
     /// 发一条群消息：入库，再按收件人逐个排队投递

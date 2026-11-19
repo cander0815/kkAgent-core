@@ -16,7 +16,7 @@ enum MemberReadiness {
         if !member.tmux.isEmpty && !bootstrap {
             // 会话不在：投递时会新开一个，新开的会话等界面就绪后就是空闲的。
             // 绑着单独会话的成员例外：进程归「会话」页管，不由群这边重建，算未知（不投）
-            guard Tmux.exists(member.tmux) else { return member.soloId != 0 ? .unknown : .idle }
+            guard Tmux.exists(member.tmux, fresh: true) else { return member.soloId != 0 ? .unknown : .idle }
             let readiness: Readiness
             switch member.agent {
             case .claude: readiness = claudeInTmux(member)
@@ -225,7 +225,10 @@ final class CodexTurns {
         } else {
             // 30 秒内刚找过、没找到：只是显示用的话直接当未知；要据此决定能不能写入（forceResolve）时照样重新找
             if !forceResolve, let at = missing[sessionId], Date().timeIntervalSince(at) < 30 { return nil }
-            guard let file = Transcript.find(agent: .codex, sessionId: sessionId) else {
+            // 要据此决定能不能写入时现场遍历；平时用所有会话共用的目录清单（见 findCodexFromListing）
+            let found = forceResolve ? Transcript.find(agent: .codex, sessionId: sessionId)
+                                     : Transcript.findCodexFromListing(sessionId: sessionId)
+            guard let file = found else {
                 missing[sessionId] = Date()
                 return nil
             }

@@ -10,15 +10,47 @@ enum Tmux {
         "kk-\(groupId)-\(alias)"
     }
 
-    static func exists(_ name: String) -> Bool {
-        (try? run(["has-session", "-t", name])) != nil
+    /// 会话在不在。默认查 1 秒内的会话名单（见 sessions()），界面每 2 秒给所有成员查一遍时不用每人起一个 tmux 进程。
+    /// 要据此动手的地方（要不要新建会话、启动后确认还在）传 fresh: true，现场问 tmux，不用可能晚 1 秒的名单
+    static func exists(_ name: String, fresh: Bool = false) -> Bool {
+        if fresh { return (try? run(["has-session", "-t", name])) != nil }
+        return sessions()[name] != nil
     }
 
     /// 会话是什么时候建的（精确到秒）。会话里的程序是建会话时一起启动的，所以这也是它的启动时间。会话不在返回 nil
     static func createdAt(_ name: String) -> Date? {
-        guard let text = try? run(["display-message", "-p", "-t", name, "#{session_created}"]),
-              let seconds = TimeInterval(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
-        return Date(timeIntervalSince1970: seconds)
+        sessions()[name]
+    }
+
+    // ---------- 会话名单缓存 ----------
+
+    private static let cacheLock = NSLock()
+    private static var cache: (at: Date, sessions: [String: Date])?
+
+    /// 所有 tmux 会话：名字 → 创建时间。一条 list-sessions 拿全部，结果记 1 秒。
+    /// 之前每查一个会话就起一个 tmux 进程，21 个成员每 2 秒要起二三十个，是核心最大的 CPU 开销
+    private static func sessions() -> [String: Date] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() } // 拿着锁去查：同一时刻好几个请求进来，只查一次，其余的等着用结果
+        if let cache, Date().timeIntervalSince(cache.at) < 1 { return cache.sessions }
+        var result: [String: Date] = [:]
+        // 一行一个会话：「创建时间 名字」。名字放最后，里面有空格也不会拆错。
+        // 一个会话都没有时 tmux 服务没起，list-sessions 退出码非 0，就当空名单
+        let text = (try? run(["list-sessions", "-F", "#{session_created} #{session_name}"])) ?? ""
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, let seconds = TimeInterval(parts[0]) else { continue }
+            result[String(parts[1])] = Date(timeIntervalSince1970: seconds)
+        }
+        cache = (Date(), result)
+        return result
+    }
+
+    /// 新建、关掉会话后清掉名单，下一次查重新拿，不会把刚建好的当成不在
+    private static func clearCache() {
+        cacheLock.lock()
+        cache = nil
+        cacheLock.unlock()
     }
 
     /// 建会话时的窗口大小（列 × 行）。给大一点，界面不会挤成一团
@@ -27,6 +59,7 @@ enum Tmux {
 
     /// 新建一个后台 tmux 会话，在 cwd 里执行 command（交给 shell 解释）
     static func start(_ name: String, cwd: String, command: String) throws {
+        defer { clearCache() }
         try run(["new-session", "-d", "-s", name, "-x", "\(width)", "-y", "\(height)", "-c", cwd, command])
         log("已在 tmux 会话 \(name) 里启动：\(command.prefix(160))")
     }
@@ -52,6 +85,7 @@ enum Tmux {
     }
 
     static func kill(_ name: String) {
+        defer { clearCache() }
         if (try? run(["kill-session", "-t", name])) != nil { log("已关闭 tmux 会话 \(name)") }
     }
 
@@ -101,7 +135,7 @@ enum Tmux {
         let deadline = Date().addingTimeInterval(timeout)
         var answeredTrust = false
         while Date() < deadline {
-            guard exists(name) else { return false }
+            guard exists(name, fresh: true) else { return false }
             let text = screen(name)
             // 先看是不是信任确认框：它上面也有「❯ No, exit」，不能误当成界面已就绪
             if text.contains("Yes, I trust this folder") {

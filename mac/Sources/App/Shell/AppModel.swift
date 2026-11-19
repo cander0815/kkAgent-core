@@ -1,4 +1,5 @@
-// 界面的全部状态。每 2 秒向核心拉一次数据；所有操作都通过接口交给核心去做。
+// 界面的全部状态。每 2 秒向核心拉一次数据（拉哪些见下面「轮询」）；所有操作都通过接口交给核心去做。
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -22,6 +23,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var needsYou: [String: String] = [:]
     /// 各群成员的忙闲：群 id → 成员列表（按入群先后）。群列表上的状态点用
     @Published private(set) var activity: [String: [MemberActivity]] = [:]
+    /// 正在运行的 ubx 虚拟机的负载，功能栏「核心」下面显示。每 10 秒查一次（见 refreshVMLoadIfDue），查不到时清空
+    @Published private(set) var vmLoads: [VMLoad] = []
 
     let api = APIClient()
     private var transcriptOffset: Int?
@@ -78,12 +81,39 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(pinnedGroupIds, forKey: "pinnedGroupIds")
     }
 
+    // ---------- 轮询 ----------
+    // 整个 app 向核心拉数据只有这一个 2 秒的循环（「端口」页不经过核心，有自己的定时器）。每一轮按下面的规则决定拉什么：
+    // - 一直拉：核心在不在、群列表、单独会话、等授权、卡住的投递。左边栏的状态点、角标和系统通知要用，在哪一页、窗口开没开都要拉
+    // - 只在群聊页、并且窗口看得见时拉：群详情、成员忙闲、执行过程。核心算这几项最费劲，别的页面又用不到
+    // - 虚拟机负载：10 秒拉一次
+
+    /// 现在显示的是哪一页，RootView 切页时设置。切回群聊页时马上补一次刷新，不用等下一轮
+    var activeModule: AppModule = .groupChat {
+        didSet { if activeModule == .groupChat && oldValue != .groupChat { Task { await refresh() } } }
+    }
+    /// 拿到最新的单独会话列表时调用（RootView 交给「会话」页，那一页不再自己拉）
+    var onSolos: (([SoloSession]) -> Void)?
+    private var lastVMLoadAt = Date.distantPast
+
+    /// 群聊页是不是正显示在用户眼前：选的是群聊页，并且主窗口没关、没最小化、没被别的窗口完全挡住
+    private var showsGroupChat: Bool {
+        activeModule == .groupChat
+            && NSApp.windows.contains { $0.canBecomeMain && $0.isVisible && $0.occlusionState.contains(.visible) }
+    }
+
     /// 开始轮询，重复调用没关系
     func start() {
         guard !started else { return }
         started = true
         notifier.onOpen = { [weak self] groupId, memberId in self?.focus(groupId: groupId, memberId: memberId) }
         notifier.onOpenSolo = { [weak self] soloId in self?.focusSolo(soloId) }
+        // 窗口重新露出来（打开、取消最小化、挡着它的窗口移开）时马上补一次刷新，不先显示旧数据
+        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.showsGroupChat else { return }
+                Task { await self.refresh() }
+            }
+        }
         Task {
             while true {
                 await refresh()
@@ -94,21 +124,30 @@ final class AppModel: ObservableObject {
 
     func refresh() async {
         do {
-            health = try await api.get("/api/health")
+            let newHealth: CoreHealth = try await api.get("/api/health")
+            if newHealth != health { health = newHealth }
             coreOnline = true
-            groups = try await api.get("/api/groups")
+            refreshVMLoadIfDue()
+            let newGroups: [GroupSummary] = try await api.get("/api/groups")
+            if newGroups != groups { groups = newGroups }
             // 选中的群没了（被解散）就切到列表里的第一个
             // 一个群都没有时 first 是 nil，和当前 nil 相同就别再切，否则 selectGroup → refresh → selectGroup 无限循环
             if !groups.contains(where: { $0.id == selectedGroupId }) && sortedGroups.first?.id != selectedGroupId {
                 selectGroup(sortedGroups.first?.id)
             }
+            let groupChat = showsGroupChat
             // 群列表上每个群的成员忙闲：要查所有群的所有成员，比别的请求慢，先发出去和后面的请求一起跑，最后再取结果
-            async let memberActivity: [MemberActivity]? = try? await api.get("/api/activity")
-            if let gid = selectedGroupId { detail = try await api.get("/api/groups/\(gid)") }
+            async let memberActivity: [MemberActivity]? = fetch("/api/activity", when: groupChat)
+            if groupChat, let gid = selectedGroupId {
+                let newDetail: GroupDetail = try await api.get("/api/groups/\(gid)")
+                if newDetail != detail { detail = newDetail }
+            }
             // 单独会话：这一轮结束、出错、启动失败弹通知横幅（不管现在在哪一页）。查不到就这次不处理，不影响别的刷新
             if let solos: [SoloSession] = try? await api.get("/api/solo") {
                 notifier.updateSolos(solos)
-                openSoloCount = solos.filter { $0.state == "running" || $0.state == "starting" }.count
+                onSolos?(solos)
+                let open = solos.filter { $0.state == "running" || $0.state == "starting" }.count
+                if open != openSoloCount { openSoloCount = open }
             }
             // 卡在授权框上的群成员和单独会话：新出现的弹通知横幅（查不到不影响别的刷新）
             let attention: [AttentionItem]? = try? await api.get("/api/attention")
@@ -117,8 +156,11 @@ final class AppModel: ObservableObject {
             let stuck: [StuckDelivery]? = try? await api.get("/api/stuck")
             if let stuck { notifier.updateStuck(stuck) }
             // 两份都拿到了才更新群列表的标识：只拿到一份就算的话，标识会一闪一闪
-            if let attention, let stuck { needsYou = Self.needsYouByGroup(attention: attention, stuck: stuck) }
-            await refreshTranscript()
+            if let attention, let stuck {
+                let reasons = Self.needsYouByGroup(attention: attention, stuck: stuck)
+                if reasons != needsYou { needsYou = reasons }
+            }
+            if groupChat { await refreshTranscript() }
             // 成员忙闲放在最后取，不挡住会话记录的刷新。查不到就保留上一次的；内容没变不重新赋值，免得整个列表重画
             if let members = await memberActivity {
                 let grouped = Dictionary(grouping: members, by: \.groupId)
@@ -126,8 +168,25 @@ final class AppModel: ObservableObject {
             }
         } catch ClientError.offline {
             coreOnline = false
+            if !vmLoads.isEmpty { vmLoads = [] } // 核心不在，不显示旧的负载数字
         } catch {
             // 单次刷新失败不弹窗，下一轮再试
+        }
+    }
+
+    /// 条件成立才发请求，否则直接返回 nil（给上面 async let 用）。请求失败也返回 nil
+    private func fetch<T: Decodable>(_ path: String, when condition: Bool) async -> T? {
+        guard condition else { return nil }
+        return try? await api.get(path)
+    }
+
+    /// 距上次超过 10 秒就拉一次虚拟机负载。单独起一个任务、不等它：虚拟机卡住时核心最多要等 15 秒，不能拖住整轮刷新
+    private func refreshVMLoadIfDue() {
+        guard Date().timeIntervalSince(lastVMLoadAt) >= 10 else { return }
+        lastVMLoadAt = Date()
+        Task {
+            let loads: [VMLoad] = (try? await api.get("/api/vm-load")) ?? [] // 查不到就不显示，不留旧数字
+            if loads != vmLoads { vmLoads = loads }
         }
     }
 

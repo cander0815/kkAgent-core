@@ -440,7 +440,7 @@ final class DeliveryQueue {
     /// 返回 true = 这次新开了会话，并且界面已经就绪（这时状态 hook 还没来得及上报，但可以确定它是空闲的）
     @discardableResult
     func ensureTmuxSession(_ member: Member) throws -> Bool {
-        guard !Tmux.exists(member.tmux) else { return false }
+        guard !Tmux.exists(member.tmux, fresh: true) else { return false }
         // 绑着单独会话的成员：进程归「会话」页管，它已经结束（销毁或用户 exit）就不能由群这边重建
         if member.soloId != 0 {
             throw CoreError(message: "\(member.alias) 绑着的单独会话已经结束，不再自动重建（需要的话到「会话」页重新新建）")
@@ -459,7 +459,7 @@ final class DeliveryQueue {
         guard Tmux.waitReady(member.tmux, readyMarker: readyMarker, timeout: Config.tmuxReadyTimeout) else {
             // 等的期间被移出 / 解散（tmux 会话被关掉）：不算界面没就绪
             if isCancelled(member.id) { throw gone }
-            guard Tmux.exists(member.tmux) else {
+            guard Tmux.exists(member.tmux, fresh: true) else {
                 throw CoreError(message: "tmux 会话 \(member.tmux) 在界面就绪前就退出了（可能是进虚拟机或启动失败）")
             }
             let minutes = Int(Config.tmuxReadyTimeout / 60)
