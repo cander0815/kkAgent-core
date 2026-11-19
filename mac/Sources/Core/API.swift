@@ -717,11 +717,17 @@ final class API {
     /// 找会话文件：先在物理机上找，找不到再到正在运行的虚拟机里挨个找（只有 Claude 会话会在虚拟机里）。
     /// 会话 ID 是随机生成的，不会两边重复，所以不用让用户选在哪台机器。返回文件路径和所在机器（空 = 物理机）
     private func locateSession(agent: AgentKind, sessionId: String) throws -> (file: String, vm: String) {
-        if let file = Transcript.find(agent: agent, sessionId: sessionId) { return (file, "") }
+        // 虚拟机的会话目录是指向物理机的软链接，在物理机上找到文件不代表会话属于物理机：
+        // 还要看它最近一次是在哪种系统上运行的（见 Transcript.lastClaudePlatform），是 linux 的到虚拟机里找
+        let hostFile = Transcript.find(agent: agent, sessionId: sessionId)
+        if let hostFile, !(agent == .claude && Transcript.lastClaudePlatform(file: hostFile) == "linux") { return (hostFile, "") }
         if agent == .claude {
             for name in VM.running() {
                 if let file = Transcript.find(agent: .claude, sessionId: sessionId, vm: name) { return (file, name) }
             }
+        }
+        if hostFile != nil {
+            throw UserError("这个 Claude 会话最近是在虚拟机里运行的，但正在运行的虚拟机里找不到它，先把虚拟机打开再试")
         }
         throw UserError("在物理机和正在运行的虚拟机里都找不到这个 \(agent.rawValue) 会话：\(sessionId)")
     }

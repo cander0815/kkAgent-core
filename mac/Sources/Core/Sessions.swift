@@ -31,6 +31,8 @@ enum Sessions {
                 let file = "\(root)/\(dir)/\(name)"
                 guard let info = localFileInfo(file) else { continue }
                 // Claude 再多读文件末尾一段：开头是大图片时第一句话读不到，要靠末尾的「最近一句提问」当标题
+                // 会话目录和虚拟机共用，虚拟机里运行的会话归虚拟机列表（见 Transcript.lastClaudePlatform）；看不出来的两边都列
+                if Transcript.lastClaudePlatform(file: file) == "linux" { continue }
                 let head = readHead(file, bytes: headBytes(.claude)) + Data("\n".utf8) + readTail(file, bytes: headBytes(.claude))
                 result.append(summarize(agent: .claude, id: String(name.dropLast(6)), vm: "",
                                         head: head, size: info.size, modified: info.modified))
@@ -97,6 +99,10 @@ enum Sessions {
             let header = block[..<headerEnd].split(separator: "\t").map(String.init)
             guard header.count == 3, let size = Int(header[1]), let epoch = Double(header[2]) else { continue }
             let id = String((header[0] as NSString).lastPathComponent.dropLast(6))
+            // 虚拟机的会话目录是指向物理机的软链接时，这里也会列出物理机的会话。同一个文件在物理机上也有，
+            // 就直接在物理机这边判断（有缓存，快）：在物理机上运行的不列，看不出来的照样列
+            let hostFile = "\(Config.home)/.claude/projects/" + header[0].split(separator: "/").suffix(2).joined(separator: "/")
+            if fm.fileExists(atPath: hostFile), Transcript.lastClaudePlatform(file: hostFile) == "darwin" { continue }
             let head = Data(block[block.index(after: headerEnd)...].utf8)
             result.append(summarize(agent: .claude, id: id, vm: vm, head: head, size: size,
                                     modified: Date(timeIntervalSince1970: epoch)))

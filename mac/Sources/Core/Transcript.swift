@@ -30,6 +30,43 @@ enum Transcript {
         }
     }
 
+    /// Claude 会话最近一次是在哪种系统上运行的：物理机 "darwin"，虚拟机 "linux"，找不到返回空。
+    /// 虚拟机的 ~/.claude/projects 是指向物理机的软链接（ExitBox 在 2026-11-16 改的），两边的会话文件放在同一个目录里，
+    /// 「文件在哪台机器上找得到」已经分不出会话属于谁，只能看会话自己的记录：
+    /// Claude 只在会话启动、resume 时写一条 environment 记录，里面有 platform，取最后一条（在另一台机器上 resume 过的话，以最近一次为准）。
+    ///
+    /// 这条记录常常在文件中间，所有会话加起来有几个 GB，每次都扫一遍太慢。会话文件只会往后追加，
+    /// 所以记住每个文件扫到了哪里、当时的结果，下次只扫新写的部分。第一次扫用内存映射、从末尾往前找，只读到找到为止。
+    static func lastClaudePlatform(file: String) -> String {
+        platformLock.lock()
+        let cached = platformCache[file]
+        platformLock.unlock()
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: file), options: .alwaysMapped) else { return "" }
+        var start = cached?.scannedTo ?? 0
+        if start > data.count { start = 0 } // 文件变短了（被重写过）：从头再扫
+        // 只扫到最后一个换行：最后一行可能还没写完，留到下次再看
+        guard let lastNewline = data[start...].lastIndex(of: 0x0A) else { return cached?.platform ?? "" }
+        let scanned = start..<(lastNewline + 1)
+
+        var platform = cached?.platform ?? ""
+        // 只认未转义的 "type":"environment"：会话内容里引用到的同样文字在 JSON 字符串里是 \"type\":\"environment\"，不会误中
+        if let env = data.range(of: Data("\"type\":\"environment\"".utf8), options: .backwards, in: scanned) {
+            let lineEnd = data[env.upperBound..<scanned.upperBound].firstIndex(of: 0x0A) ?? scanned.upperBound
+            if let key = data.range(of: Data("\"platform\":\"".utf8), in: env.upperBound..<lineEnd),
+               let end = data[key.upperBound..<lineEnd].firstIndex(of: UInt8(ascii: "\"")) {
+                platform = String(decoding: data[key.upperBound..<end], as: UTF8.self)
+            }
+        }
+        platformLock.lock()
+        platformCache[file] = (scanned.upperBound, platform)
+        platformLock.unlock()
+        return platform
+    }
+
+    /// 会话文件路径 → （扫到第几个字节，那时最后一条记录的 platform）
+    private static var platformCache: [String: (scannedTo: Int, platform: String)] = [:]
+    private static let platformLock = NSLock() // 几个请求可能同时列会话
+
     /// 用户在 Claude 里用 /rename 起的会话名（改过多次取最后一次），没起过或读不到返回空。
     /// 会话文件可能很大，用 grep 只挑出改名记录；会话 ID 作为 $1 传进去，不拼进命令里
     static func claudeCustomTitle(sessionId: String, vm: String = "") -> String {
