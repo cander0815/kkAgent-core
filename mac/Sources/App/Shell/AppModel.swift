@@ -17,6 +17,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var pinnedGroupIds: [String] = []
     /// 现在开着的单独会话有几个（运行中 + 正在启动，启动失败的不算），功能栏「会话」图标上的数字角标用
     @Published private(set) var openSoloCount = 0
+    /// 要你去处理的群：群 id → 一句话原因（成员在等授权、在等你回答、消息卡住了）。
+    /// 群列表在这些群上加橙色标识，处理掉之后下一次刷新就消失（见 needsYouByGroup）
+    @Published private(set) var needsYou: [String: String] = [:]
 
     let api = APIClient()
     private var transcriptOffset: Int?
@@ -50,6 +53,20 @@ final class AppModel: ObservableObject {
     /// 集群主群下的子群，按创建先后（先拆出来的在上面）
     func subgroups(of parentId: String) -> [GroupSummary] {
         groups.filter { $0.parentId == parentId }.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    /// 每个群要你处理什么：一个群里有好几件时，显示第一件，后面写「等 N 件」
+    private static func needsYouByGroup(attention: [AttentionItem], stuck: [StuckDelivery]) -> [String: String] {
+        var reasons: [String: [String]] = [:]
+        // 没绑进群的单独会话 groupId 为空，不在群列表里显示（它在「会话」页）
+        for item in attention where !item.groupId.isEmpty {
+            let who = item.bySubagent ? "\(item.alias) 的子 agent" : item.alias
+            reasons[item.groupId, default: []].append(item.tool == "AskUserQuestion" ? "\(who) 在等你回答" : "\(who) 在等授权")
+        }
+        for item in stuck {
+            reasons[item.groupId, default: []].append("\(item.alias) 的消息卡住了")
+        }
+        return reasons.mapValues { list in list.count == 1 ? list[0] : "\(list[0]) 等 \(list.count) 件" }
     }
 
     func isPinned(_ id: String) -> Bool { pinnedGroupIds.contains(id) }
@@ -90,9 +107,13 @@ final class AppModel: ObservableObject {
                 openSoloCount = solos.filter { $0.state == "running" || $0.state == "starting" }.count
             }
             // 卡在授权框上的群成员和单独会话：新出现的弹通知横幅（查不到不影响别的刷新）
-            if let attention: [AttentionItem] = try? await api.get("/api/attention") { notifier.update(attention) }
+            let attention: [AttentionItem]? = try? await api.get("/api/attention")
+            if let attention { notifier.update(attention) }
             // 卡住了的投递（消息写进去了没能确认，后面的都排着）：新出现的弹必须点掉的横幅（查不到不影响别的刷新）
-            if let stuck: [StuckDelivery] = try? await api.get("/api/stuck") { notifier.updateStuck(stuck) }
+            let stuck: [StuckDelivery]? = try? await api.get("/api/stuck")
+            if let stuck { notifier.updateStuck(stuck) }
+            // 两份都拿到了才更新群列表的标识：只拿到一份就算的话，标识会一闪一闪
+            if let attention, let stuck { needsYou = Self.needsYouByGroup(attention: attention, stuck: stuck) }
             await refreshTranscript()
         } catch ClientError.offline {
             coreOnline = false

@@ -25,31 +25,36 @@ struct GroupListColumn: View {
             .frame(height: 52)
             Divider()
 
-            List(selection: Binding(get: { model.selectedGroupId }, set: { model.selectGroup($0) })) {
-                ForEach(model.sortedGroups) { group in
-                    GroupRow(group: group, pinned: model.isPinned(group.id))
-                        .tag(group.id)
-                        .clickable()
+            // 不用 List(.sidebar)：系统侧栏的半透明底在窗口不在前台时是一整块灰，选中行也是灰的。
+            // 和「会话」页的列表一样：浅底，选中行用淡淡的强调色
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(model.sortedGroups) { group in
+                        GroupListItem(selected: model.selectedGroupId == group.id) { model.selectGroup(group.id) } content: {
+                            GroupRow(group: group, pinned: model.isPinned(group.id), needsYou: model.needsYou[group.id])
+                        }
                         // 右键：置顶 / 取消置顶、解散
                         .contextMenu {
                             Button(model.isPinned(group.id) ? "取消置顶" : "置顶") { model.togglePin(group.id) }
                             Divider()
                             Button(group.cluster ? "解散集群（含全部子群）…" : "解散并删除群聊…", role: .destructive) { toDissolve.value = group }
                         }
-                    // 集群的子群缩进挂在主群下面
-                    ForEach(model.subgroups(of: group.id)) { sub in
-                        SubgroupRow(group: sub)
-                            .tag(sub.id)
+                        // 集群的子群缩进挂在主群下面
+                        ForEach(model.subgroups(of: group.id)) { sub in
+                            GroupListItem(selected: model.selectedGroupId == sub.id) { model.selectGroup(sub.id) } content: {
+                                SubgroupRow(group: sub, needsYou: model.needsYou[sub.id])
+                            }
                             .padding(.leading, 14)
-                            .clickable()
                             .contextMenu {
                                 Button("解散这个子群…", role: .destructive) { toDissolve.value = sub }
                             }
+                        }
                     }
                 }
+                .padding(8)
             }
-            .listStyle(.sidebar)
         }
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.35))
         .sheet(isPresented: $showNew.value) { NewGroupSheet().environmentObject(model) }
         .sheet(isPresented: $showManage.value) { ManageGroupsView().environmentObject(model) }
         .confirmationDialog("解散群聊「\(toDissolve.value?.name ?? "")」？",
@@ -66,11 +71,14 @@ struct GroupListColumn: View {
 struct GroupRow: View {
     let group: GroupSummary
     let pinned: Bool
+    /// 要你去处理的事（成员在等授权、在等你回答、消息卡住了），没有就是 nil
+    let needsYou: String?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
+                    if needsYou != nil { NeedsYouIcon() }
                     if pinned {
                         Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.secondary).help("已置顶")
                     }
@@ -79,9 +87,13 @@ struct GroupRow: View {
                     }
                     Text(group.name).lineLimit(1)
                 }
-                Text(group.cluster ? (group.owner.isEmpty ? "还没有群主" : "群主 \(group.owner)")
-                     : group.memberCount == 0 ? "还没有成员" : "\(group.memberCount) 位成员")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let needsYou {
+                    Text(needsYou).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                } else {
+                    Text(group.cluster ? (group.owner.isEmpty ? "还没有群主" : "群主 \(group.owner)")
+                         : group.memberCount == 0 ? "还没有成员" : "\(group.memberCount) 位成员")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 4)
             Text(TimeText.relative(group.lastActive)).font(.caption2).foregroundStyle(.secondary)
@@ -93,12 +105,20 @@ struct GroupRow: View {
 /// 集群子群：一个功能。第二行显示验收进度，卡住了用橙色提醒
 struct SubgroupRow: View {
     let group: GroupSummary
+    /// 要你去处理的事，见 GroupRow.needsYou
+    let needsYou: String?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(group.name).lineLimit(1)
-                if group.blocked {
+                HStack(spacing: 4) {
+                    if needsYou != nil { NeedsYouIcon() }
+                    Text(group.name).lineLimit(1)
+                }
+                if let needsYou {
+                    // 要你处理的事排在最前面：只有你能动手，别的状态等它处理完再看
+                    Text(needsYou).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                } else if group.blocked {
                     Text("已暂停，等群主介入").font(.caption).foregroundStyle(.orange)
                 } else if group.failCount > 0 {
                     Text("打回 \(group.failCount) 次").font(.caption).foregroundStyle(.secondary)
@@ -110,6 +130,32 @@ struct SubgroupRow: View {
             Text(TimeText.relative(group.lastActive)).font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// 群列表里可以点选的一行（外框和选中样式），里面放 GroupRow 或 SubgroupRow。选中样式和「会话」页的列表一致
+private struct GroupListItem<Content: View>: View {
+    let selected: Bool
+    let action: () -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        Button(action: action) {
+            content
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor.opacity(0.15) : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clickable()
+    }
+}
+
+/// 群名前的橙色举手图标：这个群里有事要你去处理
+private struct NeedsYouIcon: View {
+    var body: some View {
+        Image(systemName: "hand.raised.fill").font(.caption).foregroundStyle(.orange).help("有事要你处理")
     }
 }
 
