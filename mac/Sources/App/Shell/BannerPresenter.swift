@@ -35,7 +35,8 @@ final class BannerPresenter {
     }
     private var sticky: Bool { UserDefaults.standard.bool(forKey: Self.stickyKey) }
 
-    func show(title: String, body: String, onClick: @escaping () -> Void) {
+    /// sticky：这一条不管设置里怎么选都要点了才消失（点横幅或点 ×），用在不能错过的通知上
+    func show(title: String, body: String, sticky: Bool = false, onClick: @escaping () -> Void) {
         let screen = Self.activeScreen()
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 80),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -50,7 +51,7 @@ final class BannerPresenter {
         var timer: DispatchWorkItem?
         let restartTimer = { [weak self, weak panel] in
             timer?.cancel()
-            guard let self, !self.sticky else { return }
+            guard let self, !sticky, !self.sticky else { return }
             let item = DispatchWorkItem { if let panel { self.dismiss(panel) } }
             timer = item
             DispatchQueue.main.asyncAfter(deadline: .now() + self.duration, execute: item)
@@ -97,12 +98,31 @@ final class BannerPresenter {
     private func dismiss(_ panel: NSPanel) {
         guard let index = active.firstIndex(of: panel) else { return } // 已经在关了
         active.remove(at: index)
+        let screen = panel.screen // 先记下在哪块屏幕：淡出、移走之后就取不到了
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
             panel.animator().alphaValue = 0
         }, completionHandler: {
             panel.orderOut(nil)
         })
+        restack(on: screen)
+    }
+
+    /// 关掉一条后，同一块屏幕上剩下的横幅从上往下重新排，下面的往上补位
+    /// （有几种横幅要点了才消失，不补位的话中间空出来的位置一直留着，新的越排越低）
+    private func restack(on screen: NSScreen?) {
+        guard let screen else { return }
+        let visible = screen.visibleFrame
+        var top = visible.maxY - margin
+        // active 按弹出的先后排，先弹的在上面
+        for panel in active where panel.screen == screen {
+            let origin = NSPoint(x: visible.maxX - width - margin, y: top - panel.frame.height)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                panel.animator().setFrameOrigin(origin)
+            }
+            top = origin.y - spacing
+        }
     }
 
     /// 用户正在看的那块屏幕：

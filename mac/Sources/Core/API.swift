@@ -19,6 +19,7 @@
 // POST   /api/attempts/:id/release         「解除并继续」：已写入未确认的投递不再挡着这个会话后面的消息（投递本身仍是未确认）
 // POST   /api/members/:id/pause            暂停 / 恢复自动投递 {paused}（暂停期间消息只排队，人在终端里手动操作时用）
 // GET    /api/attention                    现在卡在授权框上、需要人去处理的成员（所有群的，App 用来发系统通知）
+// GET    /api/stuck                        卡住了的投递：已写入未确认、还没解除的（所有群的，App 用来弹必须点掉的横幅）
 // POST   /api/members/:id/open             重新打开 tmux 成员的会话（在终端里 exit 了之后），接着原来的会话，不发任何消息
 // GET    /api/solo                         左边栏「会话」：还没结束的单独托管会话
 // POST   /api/solo                         新建单独会话 {agent, cwd}（后台启动，马上返回）；带 sessionId、vm 时是「继续沟通」：接着这个已有会话打开
@@ -206,6 +207,15 @@ final class API {
         if let p = match("POST", "api/solo/:id/hook") {
             let payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
             return hookEvent(owner: .solo(Int64(p[0]) ?? -1), launchId: req.query["launch"] ?? "", payload: payload)
+        }
+        if match("GET", "api/stuck") != nil {
+            // 补上成员名和群名（移出成员、解散群时尝试已经被解除，查询本身就不会带出来；这里查不到只是兜底）
+            let items: [StuckDelivery] = repo.stuckAttempts(excludingReason: DeliveryQueue.queuedBehindTurnReason).compactMap { stuck in
+                guard let member = try? repo.getMember(stuck.memberId), let group = try? repo.getGroup(member.groupId) else { return nil }
+                return StuckDelivery(attemptId: stuck.attemptId, memberId: member.id, groupId: group.id, groupName: group.name,
+                                     alias: member.alias, reason: stuck.reason)
+            }
+            return .json(items)
         }
         if match("GET", "api/attention") != nil {
             // 只读内存里记着的状态，不碰会话记录（App 每 2 秒查一次）。tmux 会话已经不在的不算

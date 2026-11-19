@@ -648,6 +648,20 @@ final class Repository {
             .map(attempt)
     }
 
+    /// 卡住了、要人去看的投递尝试：已写入、没确认、也没被人工解除，并且已经记成了「已写入未确认」
+    /// （正在投的那 8～15 秒里投递状态还是「投递中」，不算）。强制发送时对方在忙的那种是意料之中的，不算。
+    /// 同一次尝试合并了几条消息的，只算一次。App 用来弹「消息没能确认送达」的横幅
+    func stuckAttempts(excludingReason: String) -> [(attemptId: Int64, memberId: Int64, reason: String)] {
+        let rows = (try? db.query("""
+            SELECT a.id, a.member_id, MAX(d.error) AS error
+            FROM attempts a JOIN deliveries d ON d.attempt_id = a.id
+            WHERE a.released = 0 AND a.stage IN (?, ?) AND d.status = 'unconfirmed' AND d.error != ?
+            GROUP BY a.id ORDER BY a.id
+            """, [.int(Int64(AttemptStage.writeStarted.rawValue)), .int(Int64(AttemptStage.inputAccepted.rawValue)),
+                  .text(excludingReason)])) ?? []
+        return rows.map { ($0.int("id"), $0.int("member_id"), $0.text("error")) }
+    }
+
     /// 已经写进对方会话、投递却还是「投递中」的尝试：正常情况下投递方会马上记成已送达或未确认，
     /// 留在这里说明当时记录状态时数据库出错了，由定时检查补记（调用方要排除正在投递的成员）
     func unrecordedAttempts() -> [Attempt] {

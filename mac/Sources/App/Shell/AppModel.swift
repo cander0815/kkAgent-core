@@ -91,6 +91,8 @@ final class AppModel: ObservableObject {
             }
             // 卡在授权框上的群成员和单独会话：新出现的弹通知横幅（查不到不影响别的刷新）
             if let attention: [AttentionItem] = try? await api.get("/api/attention") { notifier.update(attention) }
+            // 卡住了的投递（消息写进去了没能确认，后面的都排着）：新出现的弹必须点掉的横幅（查不到不影响别的刷新）
+            if let stuck: [StuckDelivery] = try? await api.get("/api/stuck") { notifier.updateStuck(stuck) }
             await refreshTranscript()
         } catch ClientError.offline {
             coreOnline = false

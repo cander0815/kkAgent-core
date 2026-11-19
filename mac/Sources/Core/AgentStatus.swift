@@ -262,7 +262,9 @@ final class AgentStatusStore {
     /// 从 PermissionRequest 事件里取出工具名和要做的事（命令、文件路径等），截短成一行
     private func permissionInfo(_ payload: [String: Any], bySubagent: Bool) -> PermissionInfo {
         let input = payload["tool_input"] as? [String: Any] ?? [:]
-        let raw = ["command", "file_path", "path", "url", "pattern", "description"].lazy.compactMap { input[$0] as? String }.first
+        // 向用户提问（AskUserQuestion）：显示第一个问题本身，不显示整段 JSON
+        let question = (input["questions"] as? [[String: Any]])?.first?["question"] as? String
+        let raw = question ?? ["command", "file_path", "path", "url", "pattern", "description"].lazy.compactMap { input[$0] as? String }.first
             ?? stableJSON(payload["tool_input"])
         let line = raw.replacingOccurrences(of: "\n", with: " ")
         return PermissionInfo(bySubagent: bySubagent, tool: payload["tool_name"] as? String ?? "未知工具",

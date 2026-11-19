@@ -21,10 +21,34 @@ enum Tmux {
         return Date(timeIntervalSince1970: seconds)
     }
 
-    /// 新建一个后台 tmux 会话，在 cwd 里执行 command（交给 shell 解释）。窗口给大一点，界面不会挤成一团
+    /// 建会话时的窗口大小（列 × 行）。给大一点，界面不会挤成一团
+    static let width = 220
+    static let height = 50
+
+    /// 新建一个后台 tmux 会话，在 cwd 里执行 command（交给 shell 解释）
     static func start(_ name: String, cwd: String, command: String) throws {
-        try run(["new-session", "-d", "-s", name, "-x", "220", "-y", "50", "-c", cwd, command])
+        try run(["new-session", "-d", "-s", name, "-x", "\(width)", "-y", "\(height)", "-c", cwd, command])
         log("已在 tmux 会话 \(name) 里启动：\(command.prefix(160))")
+    }
+
+    /// 没人 attach 着、窗口却比建会话时小，就放大到至少建会话时的大小（只放大、不缩小），放大了返回 true。
+    /// 为什么要恢复：界面里的终端面板很窄，attach 时窗口会跟着缩到 50 来列（window-size latest），断开后 tmux 保持这个大小。
+    /// 窗口太窄时几百字的消息会折成几十行，超出 Codex 输入框的高度、开头被滚出屏幕，投递就确认不了「贴完整了」。
+    /// 有人 attach 着时不动，免得打乱正在看的画面。
+    /// resize-window 会把这个窗口的 window-size 改成 manual（之后再 attach 就不跟着变大小了），
+    /// 所以紧接着取消这个窗口自己的设置，回到全局设置（默认 latest；终端面板每次 attach 时也会再设一次 latest）
+    static func restoreSizeIfDetached(_ name: String) -> Bool {
+        guard let info = try? run(["display-message", "-p", "-t", name, "#{session_attached} #{window_width} #{window_height} #{session_name}"])
+        else { return false }
+        let fields = info.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ", maxSplits: 3).map(String.init)
+        guard fields.count == 4, let attached = Int(fields[0]), let w = Int(fields[1]), let h = Int(fields[2]) else { return false }
+        guard attached == 0, w < width || h < height else { return false }
+        // 每一边只放大不缩小：比如原来 250×40，变成 250×50，不能把宽度缩回 220
+        let (newW, newH) = (max(w, width), max(h, height))
+        guard (try? run(["resize-window", "-t", name, "-x", "\(newW)", "-y", "\(newH)"])) != nil else { return false }
+        _ = try? run(["set-option", "-w", "-u", "-t", name, "window-size"])
+        log("tmux 会话 \(fields[3]) 的窗口被挤小了（\(w)×\(h)），已放大到 \(newW)×\(newH)")
+        return true
     }
 
     static func kill(_ name: String) {

@@ -1,12 +1,14 @@
 // 通知（不走系统通知，用 BannerPresenter 自己画横幅，弹在用户正在看的屏幕上；系统通知只在主屏幕弹，容易错过）：
 // - 有成员 / 单独会话卡在授权框上（只有用户能去它的终端里点批准或拒绝，不提醒的话很容易注意不到）；
-// - 单独会话这一轮结束了、出错了，或者启动失败了（见 kktodo/会话提醒-方案.md）。
+// - 单独会话这一轮结束了、出错了，或者启动失败了（见 kktodo/会话提醒-方案.md）；
+// - 投递卡住了：消息写进成员的会话却没能确认收到，后面的消息都排着。
+// 等授权（含向你提问）和卡住的横幅不管设置里怎么选，都必须点掉才消失：它们停下来等的就是你。
 // 点通知：打开主窗口。群成员选中那个群和成员，右栏就是它的终端；单独会话（绑没绑进群都一样）切到「会话」页选中它。
 // 通知由 App 发：只关掉窗口没关系（App 还挂在菜单栏里）；从菜单栏彻底退出 App 后就收不到了。
 //
 // 去重键按「事件类型 | 归属 | id | 时间」：
 // permission|member|<成员id>|<开始等的时间>、permission|solo|<单独会话id>|<开始等的时间>、
-// result|solo|<id>|<这一轮的结束时间>、startup|solo|<id>。
+// result|solo|<id>|<这一轮的结束时间>、startup|solo|<id>、stuck|attempt|<投递尝试id>。
 // 单独会话的授权等待不管绑没绑进群都按单独会话记，绑进群、移出群前后是同一次等待，不会重复通知
 import AppKit
 
@@ -43,10 +45,16 @@ final class AttentionNotifier {
             }
             // 单独会话一律只带 soloId，点通知跳「会话」页（通知发出后它可能已经移出群了，不能跳到旧成员）
             let userInfo: [String: Any] = item.soloId != 0 ? ["soloId": item.soloId] : ["groupId": item.groupId, "memberId": item.memberId]
-            submit(id: permissionKey(item),
-                   title: "\(item.bySubagent ? "\(who) 的子 agent" : who) 在等授权",
-                   body: "\(item.tool)：\(item.detail)\n只有你能在它的终端里批准或拒绝。",
-                   userInfo: userInfo)
+            // 等授权的横幅必须点掉才消失：它停下来等的就是你，横幅自己淡出的话人不在屏幕前就错过了
+            let asker = item.bySubagent ? "\(who) 的子 agent" : who
+            if item.tool == "AskUserQuestion" {
+                // 向你提问：正文就是问题本身
+                submit(id: permissionKey(item), title: "\(asker) 在等你回答",
+                       body: "\(item.detail)\n到它的终端里选一个答案。", userInfo: userInfo, sticky: true)
+            } else {
+                submit(id: permissionKey(item), title: "\(asker) 在等授权",
+                       body: "\(item.tool)：\(item.detail)\n只有你能在它的终端里批准或拒绝。", userInfo: userInfo, sticky: true)
+            }
         }
     }
 
@@ -75,11 +83,23 @@ final class AttentionNotifier {
         }
     }
 
-    /// 弹一条通知横幅，同一个 id 只弹一次。点横幅：按 userInfo 跳到对应的群成员或单独会话
-    private func submit(id: String, title: String, body: String, userInfo: [String: Any]) {
+    /// 每次刷新时调用：给新卡住的投递弹横幅。这种横幅不会自己消失，必须点掉（点它跳到成员的终端，或点 × 关掉）：
+    /// 卡住后这个成员后面的消息全都排着，错过了整个群就停在那里
+    func updateStuck(_ items: [StuckDelivery]) {
+        for item in items {
+            submit(id: "stuck|attempt|\(item.attemptId)",
+                   title: "\(item.alias)（\(item.groupName)）卡住了",
+                   body: "\(item.reason)\n后面的消息先排着。点开看它的终端，处理后点「解除并继续」",
+                   userInfo: ["groupId": item.groupId, "memberId": item.memberId], sticky: true)
+        }
+    }
+
+    /// 弹一条通知横幅，同一个 id 只弹一次。点横幅：按 userInfo 跳到对应的群成员或单独会话。
+    /// sticky：不管设置里怎么选，这条都要点了才消失
+    private func submit(id: String, title: String, body: String, userInfo: [String: Any], sticky: Bool = false) {
         guard !notified.contains(id) else { return }
         notified.insert(id)
-        BannerPresenter.shared.show(title: title, body: body) { [weak self] in
+        BannerPresenter.shared.show(title: title, body: body, sticky: sticky) { [weak self] in
             if let soloId = userInfo["soloId"] as? Int64 {
                 self?.onOpenSolo?(soloId)
             } else if let groupId = userInfo["groupId"] as? String, let memberId = userInfo["memberId"] as? Int64 {

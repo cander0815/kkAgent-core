@@ -15,7 +15,7 @@ struct NotificationSettingsView: View {
                 }
                 .disabled(sticky)
                 .clickable()
-                Text("成员等授权、单独会话这一轮结束或出错时，会在你正在用的那块屏幕右上角弹出横幅。鼠标停在横幅上时不会消失；打开「点了才消失」后，横幅会一直留着，点它跳过去或点左上角 × 关掉。")
+                Text("成员等授权、单独会话这一轮结束或出错时，会在你正在用的那块屏幕右上角弹出横幅。鼠标停在横幅上时不会消失；打开「点了才消失」后，横幅会一直留着，点它跳过去或点左上角 × 关掉。等授权、等你回答问题、消息卡住（写进去了没能确认，后面的消息都在排队）这几种横幅，总是要点了才消失。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Button("弹一条试试") {
                     BannerPresenter.shared.show(title: "这是一条测试通知",

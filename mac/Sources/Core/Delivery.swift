@@ -294,8 +294,7 @@ final class DeliveryQueue {
                     recordUnconfirmed(member: member, attemptId: id, reason: reason)
                 case .queuedBehindTurn:
                     // 强制发送、对方还在忙：意料之中的未确认，记库但不通知，等它处理这一条时定时检查会补确认
-                    recordUnconfirmed(member: member, attemptId: id, notify: false,
-                                      reason: "强制发送时它正在忙，这条排在它当前这一轮之后，等它处理时会自动确认")
+                    recordUnconfirmed(member: member, attemptId: id, notify: false, reason: Self.queuedBehindTurnReason)
                 case .deferred(let reason):
                     // 还没写就放弃了：这批消息改回排队，之后再投
                     repo.cancelAttempt(id)
@@ -325,6 +324,9 @@ final class DeliveryQueue {
             enqueue(deliveryId: next.id, member: member)
         }
     }
+
+    /// 强制发送时对方在忙记下的原因。这种未确认是意料之中的，不通知（App 的「卡住了」横幅也按它排除，见 Repository.stuckAttempts）
+    static let queuedBehindTurnReason = "强制发送时它正在忙，这条排在它当前这一轮之后，等它处理时会自动确认"
 
     /// 写进去了但没能确认时记库并通知群主。分三种结果：
     /// - 改成了「已写入未确认」→ 通知群主，界面上出现「解除并继续」；

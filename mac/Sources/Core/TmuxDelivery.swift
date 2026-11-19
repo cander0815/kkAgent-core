@@ -76,6 +76,9 @@ extension DeliveryQueue {
         let target = WriteTarget(pane: pane, identity: identity, launchId: AgentStatusStore.shared.launchId(owner: .of(member)),
                                  freshlyStarted: freshlyStarted)
 
+        // 窗口被终端面板挤窄过的话先放大（原因见 Tmux.restoreSizeIfDetached），等界面按新大小重画完再看输入框
+        if Tmux.restoreSizeIfDetached(pane) { waitScreenSettled(pane) }
+
         // 2. 输入框必须是空的（里面有人在打字、或者弹着确认框，就不贴），对方必须还是空闲的
         guard let before = Composer.draft(agent: member.agent, styledScreen: Tmux.styledScreen(pane)) else {
             return .deferred("看不到输入框（可能弹着确认框）")
@@ -185,6 +188,23 @@ extension DeliveryQueue {
             case nil where target.freshlyStarted: return nil
             case true: return force ? nil : "对方已经开始干活（可能有人在终端里先发了消息）"
             default: return "对方状态未知"
+            }
+        }
+    }
+
+    /// 窗口改大小后等界面重画完：屏幕连续 300ms 不变就算画完，最多等 3 秒（等不到也照常往下走，后面的检查会把关）
+    private func waitScreenSettled(_ pane: String) {
+        let deadline = Date().addingTimeInterval(3)
+        var last = Tmux.styledScreen(pane)
+        var since = Date()
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+            let now = Tmux.styledScreen(pane)
+            if now != last {
+                last = now
+                since = Date()
+            } else if Date().timeIntervalSince(since) >= 0.3 {
+                return
             }
         }
     }

@@ -467,6 +467,26 @@ public struct ChangeSessionRequest: Codable, Sendable {
     public init(sessionId: String) { self.sessionId = sessionId }
 }
 
+/// 卡住了的投递（GET /api/stuck）：消息已经写进成员的会话，但没能确认它收到了，这个成员后面的消息都先排着，
+/// 要人去它的终端里看一眼，再「解除并继续」。App 用来弹必须点掉的横幅
+public struct StuckDelivery: Codable, Hashable, Sendable {
+    public let attemptId: Int64   // 哪一次投递尝试，App 按它去重（同一次只弹一次）
+    public let memberId: Int64
+    public let groupId: String
+    public let groupName: String
+    public let alias: String
+    public let reason: String     // 为什么没能确认
+
+    public init(attemptId: Int64, memberId: Int64, groupId: String, groupName: String, alias: String, reason: String) {
+        self.attemptId = attemptId
+        self.memberId = memberId
+        self.groupId = groupId
+        self.groupName = groupName
+        self.alias = alias
+        self.reason = reason
+    }
+}
+
 /// 卡在授权框上、需要人去处理的成员（App 用来发系统通知，所有群的都在里面）
 public struct AttentionItem: Codable, Hashable, Sendable {
     public let memberId: Int64
