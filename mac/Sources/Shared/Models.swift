@@ -467,6 +467,23 @@ public struct ChangeSessionRequest: Codable, Sendable {
     public init(sessionId: String) { self.sessionId = sessionId }
 }
 
+/// 群列表上显示的成员忙闲（GET /api/activity，所有群的成员一次返回）。
+/// 只用便宜的数据源算（状态 hook、Codex 会话记录的缓存、是否正在投递），App 每 2 秒查一次
+public struct MemberActivity: Codable, Hashable, Sendable {
+    public let memberId: Int64
+    public let groupId: String
+    public let alias: String
+    /// working 在干活；idle 空闲；waiting 在等授权 / 等你回答；off 会话没在运行；unknown 看不出来
+    public let status: String
+
+    public init(memberId: Int64, groupId: String, alias: String, status: String) {
+        self.memberId = memberId
+        self.groupId = groupId
+        self.alias = alias
+        self.status = status
+    }
+}
+
 /// 卡住了的投递（GET /api/stuck）：消息已经写进成员的会话，但没能确认它收到了，这个成员后面的消息都先排着，
 /// 要人去它的终端里看一眼，再「解除并继续」。App 用来弹必须点掉的横幅
 public struct StuckDelivery: Codable, Hashable, Sendable {

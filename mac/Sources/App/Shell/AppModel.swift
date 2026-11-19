@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     /// 要你去处理的群：群 id → 一句话原因（成员在等授权、在等你回答、消息卡住了）。
     /// 群列表在这些群上加橙色标识，处理掉之后下一次刷新就消失（见 needsYouByGroup）
     @Published private(set) var needsYou: [String: String] = [:]
+    /// 各群成员的忙闲：群 id → 成员列表（按入群先后）。群列表上的状态点用
+    @Published private(set) var activity: [String: [MemberActivity]] = [:]
 
     let api = APIClient()
     private var transcriptOffset: Int?
@@ -100,6 +102,8 @@ final class AppModel: ObservableObject {
             if !groups.contains(where: { $0.id == selectedGroupId }) && sortedGroups.first?.id != selectedGroupId {
                 selectGroup(sortedGroups.first?.id)
             }
+            // 群列表上每个群的成员忙闲：要查所有群的所有成员，比别的请求慢，先发出去和后面的请求一起跑，最后再取结果
+            async let memberActivity: [MemberActivity]? = try? await api.get("/api/activity")
             if let gid = selectedGroupId { detail = try await api.get("/api/groups/\(gid)") }
             // 单独会话：这一轮结束、出错、启动失败弹通知横幅（不管现在在哪一页）。查不到就这次不处理，不影响别的刷新
             if let solos: [SoloSession] = try? await api.get("/api/solo") {
@@ -115,6 +119,11 @@ final class AppModel: ObservableObject {
             // 两份都拿到了才更新群列表的标识：只拿到一份就算的话，标识会一闪一闪
             if let attention, let stuck { needsYou = Self.needsYouByGroup(attention: attention, stuck: stuck) }
             await refreshTranscript()
+            // 成员忙闲放在最后取，不挡住会话记录的刷新。查不到就保留上一次的；内容没变不重新赋值，免得整个列表重画
+            if let members = await memberActivity {
+                let grouped = Dictionary(grouping: members, by: \.groupId)
+                if grouped != activity { activity = grouped }
+            }
         } catch ClientError.offline {
             coreOnline = false
         } catch {

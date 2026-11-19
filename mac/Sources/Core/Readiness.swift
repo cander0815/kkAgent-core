@@ -128,6 +128,9 @@ final class CodexTurns {
 
     private let lock = NSLock()
     private var tracks: [String: Track] = [:] // 会话 ID → 跟踪进度
+    /// 最近一次没找到会话文件的时间（会话 ID → 时间）。界面每 2 秒给所有成员查一次忙闲，
+    /// 文件还没写出来的会话不记住的话，每次都要把 ~/.codex/sessions 整个遍历一遍（还拿着锁，会挡住投递）
+    private var missing: [String: Date] = [:]
 
     /// tmux 里的 Codex 现在这个进程是什么时候启动的（就是 tmux 会话的创建时间），传给下面的 startedAfter。
     /// 不在 tmux 里（桌面端）、或者 tmux 会话不在，返回 nil
@@ -220,7 +223,13 @@ final class CodexTurns {
            !forceResolve, Date().timeIntervalSince(known.resolvedAt) < 30 {
             track = known
         } else {
-            guard let file = Transcript.find(agent: .codex, sessionId: sessionId) else { return nil }
+            // 30 秒内刚找过、没找到：只是显示用的话直接当未知；要据此决定能不能写入（forceResolve）时照样重新找
+            if !forceResolve, let at = missing[sessionId], Date().timeIntervalSince(at) < 30 { return nil }
+            guard let file = Transcript.find(agent: .codex, sessionId: sessionId) else {
+                missing[sessionId] = Date()
+                return nil
+            }
+            missing[sessionId] = nil
             if var known = tracks[sessionId], known.file == file {
                 known.resolvedAt = Date() // 还是同一个文件，接着之前的进度读
                 track = known

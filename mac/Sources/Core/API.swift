@@ -20,6 +20,7 @@
 // POST   /api/members/:id/pause            暂停 / 恢复自动投递 {paused}（暂停期间消息只排队，人在终端里手动操作时用）
 // GET    /api/attention                    现在卡在授权框上、需要人去处理的成员（所有群的，App 用来发系统通知）
 // GET    /api/stuck                        卡住了的投递：已写入未确认、还没解除的（所有群的，App 用来弹必须点掉的横幅）
+// GET    /api/activity                     所有群成员的忙闲（群列表上的状态点用）
 // POST   /api/members/:id/open             重新打开 tmux 成员的会话（在终端里 exit 了之后），接着原来的会话，不发任何消息
 // GET    /api/solo                         左边栏「会话」：还没结束的单独托管会话
 // POST   /api/solo                         新建单独会话 {agent, cwd}（后台启动，马上返回）；带 sessionId、vm 时是「继续沟通」：接着这个已有会话打开
@@ -208,6 +209,14 @@ final class API {
             let payload = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
             return hookEvent(owner: .solo(Int64(p[0]) ?? -1), launchId: req.query["launch"] ?? "", payload: payload)
         }
+        if match("GET", "api/activity") != nil {
+            let items = try repo.listGroups().flatMap { group in
+                try repo.listMembers(groupId: group.id).map {
+                    MemberActivity(memberId: $0.id, groupId: group.id, alias: $0.alias, status: activity(of: $0))
+                }
+            }
+            return .json(items)
+        }
         if match("GET", "api/stuck") != nil {
             // 补上成员名和群名（移出成员、解散群时尝试已经被解除，查询本身就不会带出来；这里查不到只是兜底）
             let items: [StuckDelivery] = repo.stuckAttempts(excludingReason: DeliveryQueue.queuedBehindTurnReason).compactMap { stuck in
@@ -368,6 +377,44 @@ final class API {
                            agentStatus: agentStatus, tmuxRunning: !m.tmux.isEmpty && Tmux.exists(m.tmux),
                            openError: delivery.openError(memberId: m.id).message, openErrorSeq: delivery.openError(memberId: m.id).seq,
                            startup: startup, startupError: startupError)
+    }
+
+    /// 群列表上的忙闲（取值见 MemberActivity.status）。App 每 2 秒给所有群查一次，所以只用便宜的数据源：
+    /// 不找会话文件、不进虚拟机（这些是成员详情 state(of:) 才做的）
+    private func activity(of m: Member) -> String {
+        if !m.tmux.isEmpty && !Tmux.exists(m.tmux) { return "off" }
+        if m.agent == .claude {
+            // 只有 tmux 里的 Claude 有状态 hook。开在桌面端 / VSCode 里的：本机的读 ~/.claude/sessions 登记文件（不起子进程，
+            // 和成员详情 statusColor 同一个依据）；虚拟机里的要进虚拟机才查得到，这里不查
+            guard !m.tmux.isEmpty else {
+                if delivery.isDelivering(m.id) { return "working" }
+                guard m.vm.isEmpty else { return "unknown" }
+                let live = Transcript.claudeLiveStatus(sessionId: m.sessionId)
+                guard live.live else { return "off" }
+                return ["idle", "shell"].contains(live.status) ? "idle" : "working" // shell：这一轮结束了，只是后台还有命令在跑
+            }
+            switch AgentStatusStore.shared.cachedState(of: m) {
+            case .waitingPermission: return "waiting"
+            case .working: return "working"
+            case .idle: return delivery.isDelivering(m.id) ? "working" : "idle"
+            case .unknown:
+                // 核心重启后、对方一直没动过，hook 状态就一直未知：看屏幕。有干活动画、确认框就是忙；
+                // 输入框空着、没有动画就当空闲（只用来显示；投递前的判断还要核对会话记录，见 TmuxDelivery.writeBlocker）
+                if delivery.isDelivering(m.id) { return "working" }
+                switch MemberReadiness.claudeScreen(Tmux.styledScreen(m.tmux), turnEnded: true) {
+                case .busy: return "working"
+                case .idle: return "idle"
+                default: return "unknown"
+                }
+            }
+        }
+        // Codex：看会话记录里有没有正在跑的一轮（界面显示用，可以用文件缓存）
+        if delivery.isDelivering(m.id) { return "working" }
+        switch CodexTurns.shared.isBusy(sessionId: m.sessionId, startedAfter: CodexTurns.processStart(tmux: m.tmux)) {
+        case true: return "working"
+        case false: return "idle"
+        default: return "unknown"
+        }
     }
 
     /// 发一条群消息：入库，再按收件人逐个排队投递

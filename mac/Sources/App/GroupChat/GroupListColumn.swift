@@ -31,7 +31,8 @@ struct GroupListColumn: View {
                 LazyVStack(spacing: 2) {
                     ForEach(model.sortedGroups) { group in
                         GroupListItem(selected: model.selectedGroupId == group.id) { model.selectGroup(group.id) } content: {
-                            GroupRow(group: group, pinned: model.isPinned(group.id), needsYou: model.needsYou[group.id])
+                            GroupRow(group: group, pinned: model.isPinned(group.id), needsYou: model.needsYou[group.id],
+                                     members: model.activity[group.id] ?? [])
                         }
                         // 右键：置顶 / 取消置顶、解散
                         .contextMenu {
@@ -42,7 +43,9 @@ struct GroupListColumn: View {
                         // 集群的子群缩进挂在主群下面
                         ForEach(model.subgroups(of: group.id)) { sub in
                             GroupListItem(selected: model.selectedGroupId == sub.id) { model.selectGroup(sub.id) } content: {
-                                SubgroupRow(group: sub, needsYou: model.needsYou[sub.id])
+                                // 子群里的群主和主群那一行是同一个会话，不重复显示
+                                SubgroupRow(group: sub, needsYou: model.needsYou[sub.id],
+                                            members: (model.activity[sub.id] ?? []).filter { $0.alias != sub.owner })
                             }
                             .padding(.leading, 14)
                             .contextMenu {
@@ -73,6 +76,8 @@ struct GroupRow: View {
     let pinned: Bool
     /// 要你去处理的事（成员在等授权、在等你回答、消息卡住了），没有就是 nil
     let needsYou: String?
+    /// 成员的忙闲，显示在第二行
+    let members: [MemberActivity]
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -89,10 +94,18 @@ struct GroupRow: View {
                 }
                 if let needsYou {
                     Text(needsYou).font(.caption).foregroundStyle(.orange).lineLimit(1)
+                } else if group.cluster ? group.owner.isEmpty : group.memberCount == 0 {
+                    // 有没有成员看群本身的数据，不看忙闲（忙闲可能还没拿到、或者这次没查到）
+                    Text(group.cluster ? "还没有群主" : "还没有成员").font(.caption).foregroundStyle(.secondary)
+                } else if !members.isEmpty {
+                    HStack(spacing: 4) {
+                        if group.cluster { Text("群主").font(.caption).foregroundStyle(.secondary) }
+                        MemberActivityDots(members: members)
+                    }
+                    .lineLimit(1)
                 } else {
-                    Text(group.cluster ? (group.owner.isEmpty ? "还没有群主" : "群主 \(group.owner)")
-                         : group.memberCount == 0 ? "还没有成员" : "\(group.memberCount) 位成员")
-                        .font(.caption).foregroundStyle(.secondary)
+                    // 忙闲还没拿到（刚打开、或者查失败了）：先显示原来的文字
+                    Text(group.cluster ? "群主 \(group.owner)" : "\(group.memberCount) 位成员").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 4)
@@ -107,6 +120,8 @@ struct SubgroupRow: View {
     let group: GroupSummary
     /// 要你去处理的事，见 GroupRow.needsYou
     let needsYou: String?
+    /// coder / tester 的忙闲（不含群主，群主显示在集群主群那一行）
+    let members: [MemberActivity]
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -118,12 +133,22 @@ struct SubgroupRow: View {
                 if let needsYou {
                     // 要你处理的事排在最前面：只有你能动手，别的状态等它处理完再看
                     Text(needsYou).font(.caption).foregroundStyle(.orange).lineLimit(1)
-                } else if group.blocked {
-                    Text("已暂停，等群主介入").font(.caption).foregroundStyle(.orange)
-                } else if group.failCount > 0 {
-                    Text("打回 \(group.failCount) 次").font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text(group.branch.isEmpty ? "正在建立" : group.branch).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    // coder / tester 的忙闲，后面接验收进度（分支名在对话顶部有，这里不再显示）。
+                    // 验收进度不依赖忙闲：忙闲还没拿到时也要看得到「已暂停」
+                    HStack(spacing: 4) {
+                        if !members.isEmpty {
+                            MemberActivityDots(members: members)
+                        } else {
+                            Text(group.branch.isEmpty ? "正在建立" : group.branch).font(.caption).foregroundStyle(.secondary)
+                        }
+                        if group.blocked {
+                            Text("· 已暂停").font(.caption).foregroundStyle(.orange).help("打回超过上限，已暂停，等群主介入")
+                        } else if group.failCount > 0 {
+                            Text("· 打回 \(group.failCount) 次").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
@@ -149,6 +174,44 @@ private struct GroupListItem<Content: View>: View {
         }
         .buttonStyle(.plain)
         .clickable()
+    }
+}
+
+/// 一排成员状态：每人一个小圆点 + 名字。颜色和成员头像上的状态点一致：
+/// 绿 = 空闲，橙 = 在干活，红 = 在等授权 / 等你回答，灰 = 会话没在运行或看不出来。
+/// 一个集群里群主和各子群全是绿点，就是谁都没在干活
+private struct MemberActivityDots: View {
+    let members: [MemberActivity]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(members, id: \.memberId) { m in
+                HStack(spacing: 3) {
+                    Circle().fill(color(m.status)).frame(width: 6, height: 6)
+                    Text(m.alias).font(.caption).foregroundStyle(.secondary)
+                }
+                .help("\(m.alias)：\(label(m.status))")
+            }
+        }
+    }
+
+    private func color(_ status: String) -> Color {
+        switch status {
+        case "working": return .orange
+        case "idle": return .green
+        case "waiting": return .red
+        default: return .gray
+        }
+    }
+
+    private func label(_ status: String) -> String {
+        switch status {
+        case "working": return "在干活"
+        case "idle": return "空闲"
+        case "waiting": return "在等授权或等你回答"
+        case "off": return "会话没在运行"
+        default: return "看不出来"
+        }
     }
 }
 
